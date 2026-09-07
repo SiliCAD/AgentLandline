@@ -11,6 +11,7 @@ import queue
 import logging
 import threading
 import subprocess
+import argparse
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable
 
@@ -30,7 +31,7 @@ class ToolExecution:
 class AgentTurnResult:
     conversation_id: str
     response: str
-    status: str  # 'SUCCESS', 'ERROR'
+    status: str  # 'SUCCESS', 'ERROR', 'TIMEOUT'
     duration_seconds: float = 0.0
     tool_calls: List[ToolExecution] = field(default_factory=list)
     questions: List[Dict[str, Any]] = field(default_factory=list)
@@ -63,19 +64,26 @@ class AgyPipeline:
         self.extra_args = extra_args or []
 
         self.proc: Optional[subprocess.Popen] = None
-        self.conversation_id: Optional[str] = None
+        self.conversation_id: Optional[str] = conversation_id
         self.available_tools: List[str] = []
         self.permission_mode: Optional[str] = None
 
         self._running = False
         self._reader_thread: Optional[threading.Thread] = None
         self._event_listeners: List[Callable[[Dict[str, Any]], None]] = []
-        
+
         # Turn synchronization
         self._turn_lock = threading.Lock()
         self._turn_done_event = threading.Event()
         self._current_turn_result: Optional[AgentTurnResult] = None
         self._current_tools_by_step: Dict[int, ToolExecution] = {}
+
+    def set_conversation_id(self, conversation_id: Optional[str]):
+        """Configures or updates the conversation ID to resume before starting the pipeline."""
+        self.resume_conversation_id = conversation_id
+        self.conversation_id = conversation_id
+        if self._running:
+            logger.warning("Pipeline is already running. Changing conversation_id will take effect on next process restart.")
 
     def add_event_listener(self, listener: Callable[[Dict[str, Any]], None]):
         """Register a callback for all raw stream-json events."""
@@ -136,7 +144,7 @@ class AgyPipeline:
                 self._handle_event(event_data, init_ready)
 
             self._running = False
-            # Ensure waiting turn is unblocked if process exits unexpectedly
+            # Unblock waiting turn if reader thread exits unexpectedly
             self._turn_done_event.set()
 
         self._reader_thread = threading.Thread(target=_reader, daemon=True)
@@ -145,7 +153,7 @@ class AgyPipeline:
         # Wait for init event
         if not init_ready.wait(timeout=timeout):
             self.close()
-            raise TimeoutError("Timed out waiting for agy init event.")
+            raise TimeoutError(f"Timed out waiting for agy init event (conversation_id={self.resume_conversation_id}).")
 
     def _handle_event(self, event: Dict[str, Any], init_ready: threading.Event):
         event_type = event.get("event")
@@ -158,7 +166,7 @@ class AgyPipeline:
                 logger.error(f"Error in event listener: {e}")
 
         if event_type == "init":
-            self.conversation_id = event.get("conversation_id")
+            self.conversation_id = event.get("conversation_id") or self.resume_conversation_id
             init_data = event.get("init", {})
             self.available_tools = init_data.get("tools", [])
             self.permission_mode = init_data.get("permission_mode")
@@ -216,13 +224,25 @@ class AgyPipeline:
             self._turn_done_event.set()
 
     def _extract_recent_questions(self) -> List[Dict[str, Any]]:
-        """Extracts any ask_question tool calls from the conversation transcript."""
+        """Extracts any ask_question tool calls from the conversation transcript across candidate directories."""
         if not self.conversation_id:
             return []
-        transcript_path = os.path.expanduser(
-            f"~/.gemini/antigravity-cli/brain/{self.conversation_id}/.system_generated/logs/transcript.jsonl"
-        )
-        if not os.path.exists(transcript_path):
+
+        candidates = [
+            os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{self.conversation_id}/.system_generated/logs/transcript.jsonl"),
+            os.path.expanduser(f"~/.gemini/antigravity-ide/brain/{self.conversation_id}/.system_generated/logs/transcript.jsonl"),
+        ]
+        app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
+        if app_data:
+            candidates.insert(0, os.path.join(app_data, "brain", self.conversation_id, ".system_generated", "logs", "transcript.jsonl"))
+
+        transcript_path = None
+        for path in candidates:
+            if os.path.exists(path):
+                transcript_path = path
+                break
+
+        if not transcript_path:
             return []
 
         questions = []
@@ -260,7 +280,7 @@ class AgyPipeline:
         """
         # Auto-recover if agy process was killed or closed
         if not self._running or self.proc is None or self.proc.poll() is not None:
-            logger.warning("Pipeline process not running. Auto-restarting and resuming session...")
+            logger.warning("Pipeline process not running. Auto-restarting session...")
             if self.conversation_id:
                 self.resume_conversation_id = self.conversation_id
             self.start()
@@ -274,7 +294,6 @@ class AgyPipeline:
                 status="UNKNOWN"
             )
 
-            # Construct the stream-json user message payload
             payload = {
                 "event": "user",
                 "message": {
@@ -284,19 +303,34 @@ class AgyPipeline:
 
             logger.debug(f"Sending prompt: {prompt[:100]}...")
             msg_str = json.dumps(payload) + "\n"
-            self.proc.stdin.write(msg_str)
-            self.proc.stdin.flush()
+
+            try:
+                if self.proc and self.proc.stdin:
+                    self.proc.stdin.write(msg_str)
+                    self.proc.stdin.flush()
+                else:
+                    raise IOError("Process stdin unavailable.")
+            except (BrokenPipeError, IOError, AttributeError) as e:
+                logger.warning(f"Failed writing to process stdin ({e}). Restarting pipeline...")
+                self.close()
+                self.start()
+                if self.proc and self.proc.stdin:
+                    self.proc.stdin.write(msg_str)
+                    self.proc.stdin.flush()
 
             finished = self._turn_done_event.wait(timeout=timeout)
             if not finished:
                 self._current_turn_result.status = "TIMEOUT"
                 self._current_turn_result.error = f"Agent turn timed out after {timeout} seconds."
                 logger.error(self._current_turn_result.error)
+                # Restart process on timeout to avoid out-of-order event corruption
+                self.close()
 
-            # Extract any questions called during this turn
-            recent_questions = self._extract_recent_questions()
-            if recent_questions:
-                self._current_turn_result.questions = recent_questions
+            # Extract any questions called during this turn if not already captured
+            if not self._current_turn_result.questions:
+                recent_questions = self._extract_recent_questions()
+                if recent_questions:
+                    self._current_turn_result.questions = recent_questions
 
             return self._current_turn_result
 
@@ -327,7 +361,36 @@ class AgyPipeline:
 
 
 def main():
-    """Interactive test: starts pipeline and loops 5 times reading from stdio."""
+    """Interactive CLI test for AgyPipeline."""
+    parser = argparse.ArgumentParser(description="Run AgyPipeline interactive session.")
+    parser.add_argument(
+        "-c", "--conversation",
+        dest="conversation_id",
+        type=str,
+        default=None,
+        help="Conversation ID to resume (e.g., --conversation 39231db7-012f-4be3-b3c8-938fd86e6c18)"
+    )
+    parser.add_argument(
+        "-m", "--model",
+        type=str,
+        default=None,
+        help="Model name to use (e.g., gemini-3.6-flash)"
+    )
+    parser.add_argument(
+        "-e", "--effort",
+        type=str,
+        default=None,
+        help="Reasoning effort level"
+    )
+    parser.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        help="Working directory for the pipeline"
+    )
+
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s - %(levelname)s - %(message)s"
@@ -335,9 +398,17 @@ def main():
 
     print("==================================================")
     print("1) Starting AgyPipeline...")
+    if args.conversation_id:
+        print(f"Resuming Conversation ID: {args.conversation_id}")
     print("==================================================")
 
-    pipeline = AgyPipeline(skip_permissions=True)
+    pipeline = AgyPipeline(
+        cwd=args.cwd,
+        skip_permissions=True,
+        model=args.model,
+        effort=args.effort,
+        conversation_id=args.conversation_id,
+    )
     pipeline.start()
     print(f"Conversation ID: {pipeline.conversation_id}")
     print(f"Tools detected: {len(pipeline.available_tools)}")
@@ -345,7 +416,6 @@ def main():
 
     try:
         for i in range(1, 6):
-            # l1) input from stdio
             try:
                 user_prompt = input(f"\n[Turn {i}/5] Enter prompt: ").strip()
             except EOFError:
@@ -360,14 +430,10 @@ def main():
                 print("Exit requested. Ending session.")
                 break
 
-            # l2) start time
             start_time = time.time()
-
-            # l3) send that input to agy using send
             result = pipeline.send(user_prompt)
-
-            # l4) stop time and report time and the output from the agent
             elapsed = time.time() - start_time
+
             print(f"\n[Turn {i}/5 Result]")
             print(f"Time Taken : {elapsed:.2f}s")
             print(f"Status     : {result.status}")
@@ -378,12 +444,13 @@ def main():
             if result.questions:
                 print(f"\n[Question(s) from Agent]:")
                 for q in result.questions:
-                    q_data = q.get("question_data")
+                    q_data = q.get("question_data") or q.get("questions") or q
                     if isinstance(q_data, list):
                         for item in q_data:
-                            print(f"  ? {item.get('question')}")
-                            for opt in item.get('options', []):
-                                print(f"    - {opt}")
+                            print(f"  ? {item.get('question') if isinstance(item, dict) else item}")
+                            if isinstance(item, dict):
+                                for opt in item.get('options', []):
+                                    print(f"    - {opt}")
                     elif isinstance(q_data, dict):
                         print(f"  ? {q_data.get('question')}")
                         for opt in q_data.get('options', []):
@@ -406,4 +473,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
