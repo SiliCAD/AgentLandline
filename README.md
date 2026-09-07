@@ -143,6 +143,3 @@ python tests/test_agy_pipeline.py
 
 ---
 
-## 📄 License
-
-MIT License.
