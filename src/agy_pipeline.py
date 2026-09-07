@@ -71,6 +71,8 @@ class AgyPipeline:
         self._running = False
         self._reader_thread: Optional[threading.Thread] = None
         self._event_listeners: List[Callable[[Dict[str, Any]], None]] = []
+        self._live_output_buffer: List[str] = []
+        self._buffer_lock = threading.Lock()
 
         # Turn synchronization
         self._turn_lock = threading.Lock()
@@ -88,6 +90,14 @@ class AgyPipeline:
     def add_event_listener(self, listener: Callable[[Dict[str, Any]], None]):
         """Register a callback for all raw stream-json events."""
         self._event_listeners.append(listener)
+
+    def get_live_output(self, clear: bool = False) -> str:
+        """Returns accumulated raw reader stream output lines as a single string."""
+        with self._buffer_lock:
+            out_str = "\n".join(self._live_output_buffer)
+            if clear:
+                self._live_output_buffer.clear()
+            return out_str
 
     def start(self, timeout: float = 30.0):
         """Starts the agy background process and waits for the 'init' event."""
@@ -134,6 +144,11 @@ class AgyPipeline:
                 line_str = line.strip()
                 if not line_str:
                     continue
+
+                with self._buffer_lock:
+                    self._live_output_buffer.append(line_str)
+                    if len(self._live_output_buffer) > 500:
+                        self._live_output_buffer.pop(0)
 
                 try:
                     event_data = json.loads(line_str)
@@ -224,7 +239,7 @@ class AgyPipeline:
             self._turn_done_event.set()
 
     def _extract_recent_questions(self) -> List[Dict[str, Any]]:
-        """Extracts any ask_question tool calls from the conversation transcript across candidate directories."""
+        """Extracts any ask_question tool calls from the recent turn in the conversation transcript."""
         if not self.conversation_id:
             return []
 
@@ -247,8 +262,10 @@ class AgyPipeline:
 
         questions = []
         try:
+            from collections import deque
             with open(transcript_path, "r", encoding="utf-8") as f:
-                for line in f:
+                recent_lines = deque(f, maxlen=30)
+                for line in recent_lines:
                     try:
                         step_obj = json.loads(line)
                         for tc in step_obj.get("tool_calls", []):
@@ -269,7 +286,7 @@ class AgyPipeline:
                     except Exception:
                         continue
         except Exception as e:
-            logger.debug(f"Could not read transcript for questions: {e}")
+            logger.debug(f"Could not read recent transcript for questions: {e}")
 
         return questions
 

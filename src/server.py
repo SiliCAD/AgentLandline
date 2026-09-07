@@ -68,11 +68,17 @@ def send_prompt(prompt: str, timeout: float = 120.0) -> str:
 
 
 @mcp.tool()
-def agent_status() -> str:
+def agent_status(mode: str = "process") -> str:
     """
-    Get the status of the current agy agent session and process.
+    Get status info for the agy agent session.
+    
+    Args:
+        mode: Status mode:
+            - 'process': Check process health, PID, conversation_id, and available tools.
+            - 'output': Return live stream reader output collected so far.
+            - 'transcript': Read transcript.jsonl and return the last prompt & response.
     """
-    res = manager.status()
+    res = manager.status(mode=mode)
     return json.dumps(res, indent=2)
 
 
