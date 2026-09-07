@@ -132,10 +132,8 @@ class AgyManager:
         last_step_index = None
 
         try:
-            from collections import deque
             with open(transcript_path, "r", encoding="utf-8") as f:
-                recent_lines = deque(f, maxlen=100)
-                for line in recent_lines:
+                for line in f:
                     try:
                         obj = json.loads(line)
                         step_type = obj.get("type") or obj.get("event")
