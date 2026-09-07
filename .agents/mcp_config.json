@@ -3,10 +3,10 @@
     "agent-landline": {
       "command": "python3",
       "args": [
-        "${workspaceFolder}/src/server.py"
+        "src/server.py"
       ],
       "env": {
-        "PYTHONPATH": "${workspaceFolder}/src"
+        "PYTHONPATH": "src"
       }
     }
   }
