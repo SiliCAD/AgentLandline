@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agent-landline": {
+      "command": "python3",
+      "args": [
+        "${workspaceFolder}/src/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    }
+  }
+}
