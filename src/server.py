@@ -1,10 +1,13 @@
 """
 Main MCP Server Entrypoint for AgentLandline.
+Integrates AgyManager and issue reporter tools.
 """
-import sys
+import json
 import logging
+from typing import Optional
 from mcp.server.fastmcp import FastMCP, Context
 from issue_reporter import IssueReporter
+from agy_manager import AgyManager
 
 # Configure logger
 logging.basicConfig(
@@ -13,8 +16,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AgentLandline")
 
-# Initialize FastMCP Server
+# Initialize FastMCP Server and global AgyManager instance
 mcp = FastMCP("AgentLandline")
+manager = AgyManager()
 
 
 def get_client_agent_name(ctx: Context = None) -> str:
@@ -29,6 +33,56 @@ def get_client_agent_name(ctx: Context = None) -> str:
     except Exception as e:
         logger.debug(f"Could not extract clientInfo from MCP context: {e}")
     return "unknown"
+
+
+@mcp.tool()
+def initialize_agent(
+    conversation_id: str,
+    cwd: str = ""
+) -> str:
+    """
+    Initialize and resume an agy agent process backend for a specified conversation ID.
+    
+    Args:
+        conversation_id: The conversation ID of the existing agent session to resume.
+        cwd: Working directory path for the agent process (optional).
+    """
+    res = manager.initialize(
+        conversation_id=conversation_id,
+        cwd=cwd if cwd else None
+    )
+    return json.dumps(res, indent=2)
+
+
+@mcp.tool()
+def send_prompt(prompt: str, timeout: float = 120.0) -> str:
+    """
+    Send a prompt to the running agy agent session and wait for the response.
+    
+    Args:
+        prompt: User prompt text to send to the agent.
+        timeout: Maximum wait time in seconds for the agent turn.
+    """
+    res = manager.send_prompt(prompt, timeout=timeout)
+    return json.dumps(res, indent=2)
+
+
+@mcp.tool()
+def agent_status() -> str:
+    """
+    Get the status of the current agy agent session and process.
+    """
+    res = manager.status()
+    return json.dumps(res, indent=2)
+
+
+@mcp.tool()
+def exit_agent() -> str:
+    """
+    Close and terminate the current agy agent session cleanly.
+    """
+    res = manager.exit()
+    return json.dumps(res, indent=2)
 
 
 @mcp.tool()
