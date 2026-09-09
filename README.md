@@ -11,7 +11,7 @@ It allows external AI agents (such as Antigravity IDE, Claude Code, Cursor, or c
 - **🔌 MCP Server Integration**: Exposes clean, standardized MCP tools using [FastMCP](https://github.com/jlowin/fastmcp) for easy integration into any MCP-compatible environment.
 - **🔄 Multi-Turn Session Orchestration**: Seamlessly resumes and maintains `agy` conversation sessions using background streaming JSON subprocess communication.
 - **📊 Real-time Status & Transcript Monitoring**: Inspect live process health, streaming output buffers, and line-by-line step transcripts (`transcript.jsonl`).
-- **🐛 Automated GitHub Issue Reporting**: Instantly report bugs, tracebacks, or feature requests directly to GitHub via the `gh` CLI with automatic client-agent detection (e.g. auto-labeling `Antigravity`, `claude-code`).
+- **🐛 Automated GitHub Issue Reporting**: Instantly report bugs, tracebacks, or feature requests directly to GitHub via the `gh` CLI with automatic client-agent detection, smart label normalization (`new_lable` <-> `new lable`, typo matching), and auto-creation of missing labels with random colors.
 - **🛠 Robust Process Recovery**: Automatic re-initialization and stream re-connection upon process interrupts or stdin pipe errors.
 
 ---
@@ -26,8 +26,9 @@ AgentLandline/
 │   ├── agy_pipeline.py    # Headless Subprocess Engine for agy CLI (stream-json)
 │   └── issue_reporter.py # GitHub Issue Reporter & gh CLI wrapper
 ├── tests/
-│   ├── test_agy_manager.py  # Unit test for transcript parser
-│   └── test_agy_pipeline.py # Integration test for multi-turn agy sessions
+│   ├── test_agy_manager.py    # Unit test for transcript parser
+│   ├── test_agy_pipeline.py   # Integration test for multi-turn agy sessions
+│   └── test_issue_reporter.py # Unit tests for smart label matching and auto-creation
 └── requirements.txt      # Dependencies
 ```
 
@@ -36,7 +37,7 @@ AgentLandline/
 1. **`src/server.py`**: The FastMCP server hosting tools for client agents. Automatically extracts client agent metadata (`clientInfo`) on initialization.
 2. **`src/agy_manager.py`**: High-level manager (`AgyManager`) that maintains active pipeline instances and provides transcript search across standard CLI/IDE brain directories.
 3. **`src/agy_pipeline.py`**: Non-blocking subprocess bridge (`AgyPipeline`) that launches `agy` with `--input-format stream-json --output-format stream-json`, parsing tool calls (`ToolExecution`), token usage, questions (`ask_question`), and status in real time.
-4. **`src/issue_reporter.py`**: Utility (`IssueReporter`) formatting GitHub issues with session metadata, log file references, and auto-creating agent labels via `gh label create`.
+4. **`src/issue_reporter.py`**: Utility (`IssueReporter`) formatting GitHub issues with session metadata, smart label normalization/matching (typography tolerance), and auto-creating missing labels with random colors.
 
 ---
 
@@ -87,7 +88,7 @@ Add **AgentLandline** to your MCP client configuration file (e.g., `~/.gemini/an
 | `send_prompt` | `prompt` *(str)*<br>`timeout` *(float, default: 120.0)* | Sends a prompt to the active `agy` session and returns the agent's turn response and tool metrics. |
 | `agent_status` | `mode` *(str, default: 'process')* | Queries status. Modes: `process` (PID & health), `output` (live output buffer), `transcript` (last turn transcript). |
 | `exit_agent` | *None* | Gracefully terminates and cleans up the current `agy` agent process. |
-| `report_issue` | `title` *(str)*<br>`body` *(str)*<br>`label` *(str)*<br>`agent_model` *(str)*<br>`session_id` *(str)* | Creates a GitHub issue with formatted metadata (agent model, session ID, log path) and auto-creates agent labels. |
+| `report_issue` | `title` *(str)*<br>`body` *(str)*<br>`label` *(str)*<br>`agent_model` *(str)*<br>`session_id` *(str)* | Creates a GitHub issue with formatted metadata, smart typography/typo label matching (`new_lable` <-> `new lable`), and auto-creation of missing labels with random colors. |
 
 ---
 
