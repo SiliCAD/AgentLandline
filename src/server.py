@@ -38,7 +38,8 @@ def get_client_agent_name(ctx: Context = None) -> str:
 @mcp.tool()
 def initialize_agent(
     conversation_id: str,
-    cwd: str = ""
+    cwd: str = "",
+    fork: bool = False
 ) -> str:
     """
     Initialize and resume an agy agent process backend for a specified conversation ID.
@@ -46,10 +47,12 @@ def initialize_agent(
     Args:
         conversation_id: The conversation ID of the existing agent session to resume.
         cwd: Working directory path for the agent process (optional).
+        fork: Whether to fork the conversation into a new session (optional).
     """
     res = manager.initialize(
         conversation_id=conversation_id,
-        cwd=cwd if cwd else None
+        cwd=cwd if cwd else None,
+        fork=fork
     )
     return json.dumps(res, indent=2)
 

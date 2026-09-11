@@ -28,7 +28,8 @@ class AgyManager:
         conversation_id: str,
         cwd: Optional[str] = None,
         skip_permissions: bool = True,
-        timeout: float = 30.0
+        timeout: float = 30.0,
+        fork: bool = False
     ) -> Dict[str, Any]:
         """
         Initializes and starts the underlying AgyPipeline to resume a specified conversation_id.
