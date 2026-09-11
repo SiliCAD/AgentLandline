@@ -39,20 +39,23 @@ def get_client_agent_name(ctx: Context = None) -> str:
 def initialize_agent(
     conversation_id: str,
     cwd: str = "",
-    fork: bool = False
+    fork: bool = False,
+    new_conversation_id: str = ""
 ) -> str:
     """
     Initialize and resume an agy agent process backend for a specified conversation ID.
     
     Args:
-        conversation_id: The conversation ID of the existing agent session to resume.
+        conversation_id: The conversation ID of the existing agent session to resume (or fork from).
         cwd: Working directory path for the agent process (optional).
         fork: Whether to fork the conversation into a new session (optional).
+        new_conversation_id: Optional custom conversation ID for the fork (auto-generated if omitted).
     """
     res = manager.initialize(
         conversation_id=conversation_id,
         cwd=cwd if cwd else None,
-        fork=fork
+        fork=fork,
+        new_conversation_id=new_conversation_id if new_conversation_id else None
     )
     return json.dumps(res, indent=2)
 

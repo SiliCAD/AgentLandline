@@ -5,6 +5,9 @@ Exposes initialize, send_prompt, status, extract_last_command, and exit public m
 
 import os
 import json
+import time
+import shutil
+import sqlite3
 import logging
 from typing import Optional, Dict, Any, List
 from agy_pipeline import AgyPipeline, AgentTurnResult
@@ -23,13 +26,38 @@ class AgyManager:
         self.last_prompt_output: Optional[str] = None
         self.last_turn_status: Optional[str] = None
 
+    def fork_conversation(self, parent_id: str, new_id: Optional[str] = None) -> str:
+        """
+        Forks an existing agy conversation session into a new conversation ID.
+        """
+        fork_id = new_id or f"fork-{int(time.time())}"
+        cli_dir = os.path.expanduser("~/.gemini/antigravity-cli")
+
+        parent_db = os.path.join(cli_dir, "conversations", f"{parent_id}.db")
+        if not os.path.exists(parent_db):
+            raise FileNotFoundError(f"Conversation '{parent_id}' not found in {cli_dir}/conversations/")
+
+        # 1. Clone DB and update internal cascade_id
+        fork_db = os.path.join(cli_dir, "conversations", f"{fork_id}.db")
+        shutil.copy2(parent_db, fork_db)
+        with sqlite3.connect(fork_db) as conn:
+            conn.execute("UPDATE trajectory_meta SET cascade_id = ?;", (fork_id,))
+
+        # 2. Clone brain artifacts directory if present
+        parent_brain = os.path.join(cli_dir, "brain", parent_id)
+        if os.path.isdir(parent_brain):
+            shutil.copytree(parent_brain, os.path.join(cli_dir, "brain", fork_id), dirs_exist_ok=True)
+
+        return fork_id
+
     def initialize(
         self,
         conversation_id: str,
         cwd: Optional[str] = None,
         skip_permissions: bool = True,
         timeout: float = 30.0,
-        fork: bool = False
+        fork: bool = False,
+        new_conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Initializes and starts the underlying AgyPipeline to resume a specified conversation_id.
@@ -40,6 +68,17 @@ class AgyManager:
 
         self.last_prompt_output = None
         self.last_turn_status = None
+
+        if fork:
+            try:
+                conversation_id = self.fork_conversation(conversation_id, new_conversation_id)
+            except Exception as e:
+                logger.error(f"Failed to fork conversation '{conversation_id}': {e}")
+                return {
+                    "status": "ERROR",
+                    "error": f"Failed to fork conversation: {e}",
+                    "conversation_id": conversation_id
+                }
 
         self.pipeline = AgyPipeline(
             cwd=cwd,

@@ -76,5 +76,56 @@ def test_extract_last_command_long_turn(tmp_path=None):
         os.environ.pop("ANTIGRAVITY_APP_DATA_DIR", None)
 
 
+def test_fork_conversation():
+    import sqlite3
+    import shutil
+    from unittest.mock import patch
+
+    manager = AgyManager()
+    temp_dir = tempfile.mkdtemp()
+    conv_dir = os.path.join(temp_dir, "conversations")
+    brain_dir = os.path.join(temp_dir, "brain", "parent-123", ".system_generated", "logs")
+    os.makedirs(conv_dir, exist_ok=True)
+    os.makedirs(brain_dir, exist_ok=True)
+
+    # 1. Setup parent DB
+    parent_db = os.path.join(conv_dir, "parent-123.db")
+    with sqlite3.connect(parent_db) as conn:
+        conn.execute("CREATE TABLE trajectory_meta (trajectory_id text, cascade_id text);")
+        conn.execute("INSERT INTO trajectory_meta VALUES ('traj-1', 'parent-123');")
+        conn.commit()
+
+    # 2. Setup parent brain transcript
+    parent_transcript = os.path.join(brain_dir, "transcript.jsonl")
+    with open(parent_transcript, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"step_index": 1, "type": "USER_INPUT", "content": "Parent question"}) + "\n")
+
+    with patch("os.path.expanduser", return_value=temp_dir):
+        try:
+            # Fork conversation
+            fork_id = manager.fork_conversation(parent_id="parent-123", new_id="fork-test-999")
+            assert fork_id == "fork-test-999", f"Expected fork-test-999, got {fork_id}"
+
+            # Verify cloned DB
+            fork_db = os.path.join(conv_dir, "fork-test-999.db")
+            assert os.path.exists(fork_db), "Forked DB does not exist!"
+            with sqlite3.connect(fork_db) as conn:
+                row = conn.execute("SELECT cascade_id FROM trajectory_meta WHERE trajectory_id = 'traj-1';").fetchone()
+                assert row and row[0] == "fork-test-999", f"Expected cascade_id 'fork-test-999', got {row}"
+
+            # Verify cloned brain & transcript
+            fork_transcript = os.path.join(temp_dir, "brain", "fork-test-999", ".system_generated", "logs", "transcript.jsonl")
+            assert os.path.exists(fork_transcript), "Forked transcript does not exist!"
+            with open(fork_transcript, "r", encoding="utf-8") as f:
+                content = f.read()
+                assert "Parent question" in content
+
+            print("test_fork_conversation PASSED!")
+
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_extract_last_command_long_turn()
+    test_fork_conversation()
