@@ -192,10 +192,25 @@ class ClaudePipeline:
         self._reader_thread = threading.Thread(target=_reader, daemon=True)
         self._reader_thread.start()
 
-        # Wait for init event
-        if not init_ready.wait(timeout=timeout):
+        # Unlike agy, Claude Code's headless stream-json mode does not reliably emit a
+        # system/init handshake before the first turn is sent - especially when resuming
+        # via --resume, it can stay silent on stdout until it receives a prompt. So a
+        # missing init event within `timeout` is not treated as fatal here: we only raise
+        # if the process has actually died (bad args, auth failure, unknown session id,
+        # etc.), surfacing its stderr for diagnosis. A live-but-quiet process is normal;
+        # conversation_id/available_tools populate from whatever the first send() returns.
+        init_ready.wait(timeout=timeout)
+        if self.proc.poll() is not None:
+            returncode = self.proc.returncode
+            stderr_output = ""
+            try:
+                if self.proc.stderr:
+                    stderr_output = self.proc.stderr.read().strip()
+            except Exception:
+                pass
             self.close()
-            raise TimeoutError(f"Timed out waiting for claude init event (conversation_id={self.resume_conversation_id}).")
+            detail = f": {stderr_output}" if stderr_output else " (no stderr output)."
+            raise RuntimeError(f"claude process exited during startup (code={returncode}){detail}")
 
     def _handle_event(self, event: Dict[str, Any], init_ready: threading.Event):
         event_type = event.get("type")

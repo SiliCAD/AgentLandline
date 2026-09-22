@@ -79,6 +79,84 @@ def test_claude_command_uses_permission_mode_when_not_skipping():
 
 
 # ---------------------------------------------------------------------------
+# ClaudePipeline.start() lifecycle (mocked subprocess.Popen, no real `claude`)
+#
+# Regression coverage for a real bug found via live testing: when resuming a
+# session with --resume, Claude Code can stay silent on stdout (no system/init
+# event) until the first turn is actually sent, unlike agy which announces
+# init proactively. The original start() blocked forever waiting for that
+# init event and raised TimeoutError, permanently deadlocking any --resume
+# session that doesn't proactively announce itself - send_prompt() could
+# never get called because initialize_agent() never returned successfully.
+# ---------------------------------------------------------------------------
+
+class _BlockingStdout:
+    """Simulates a live process that never writes anything to stdout."""
+    def readline(self):
+        threading.Event().wait()  # blocks forever; thread is daemon, harmless in tests
+        return ""
+
+
+class _FakeStdin:
+    def write(self, _data):
+        pass
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class _FakeProc:
+    def __init__(self, poll_result=None, stderr_text=""):
+        self._poll_result = poll_result
+        self.returncode = poll_result
+        self.stdin = _FakeStdin()
+        self.stdout = _BlockingStdout()
+        self.stderr = _StderrStub(stderr_text)
+
+    def poll(self):
+        return self._poll_result
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        pass
+
+    def kill(self):
+        pass
+
+
+class _StderrStub:
+    def __init__(self, text):
+        self._text = text
+
+    def read(self):
+        return self._text
+
+
+def test_claude_start_does_not_raise_when_init_never_arrives_but_process_is_alive():
+    """A live-but-quiet process (the --resume case) must not be treated as a startup failure."""
+    fake_proc = _FakeProc(poll_result=None)  # still running
+    p = ClaudePipeline(cwd="/tmp", conversation_id="some-session")
+    with patch("claude_pipeline.subprocess.Popen", return_value=fake_proc):
+        p.start(timeout=0.2)  # must return normally, not raise TimeoutError
+    assert p._running is True
+    assert p.proc is fake_proc
+
+
+def test_claude_start_raises_with_stderr_when_process_dies_during_startup():
+    """A process that actually exits during startup (bad args, auth failure, ...) must still raise."""
+    fake_proc = _FakeProc(poll_result=1, stderr_text="Error: no conversation found with session ID: bogus")
+    p = ClaudePipeline(cwd="/tmp", conversation_id="bogus")
+    with patch("claude_pipeline.subprocess.Popen", return_value=fake_proc):
+        with pytest.raises(RuntimeError, match="no conversation found"):
+            p.start(timeout=0.2)
+
+
+# ---------------------------------------------------------------------------
 # ClaudePipeline stream-json event parsing
 # ---------------------------------------------------------------------------
 
