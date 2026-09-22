@@ -1,6 +1,7 @@
 """
-AgyManager: High-level manager wrapping AgyPipeline for orchestration and MCP integration.
-Exposes initialize, send_prompt, status, extract_last_command, and exit public methods.
+AgyManager: High-level manager wrapping agent CLI pipelines for orchestration and MCP integration.
+Exposes initialize, send_prompt, status, extract_last_command, and exit public methods, and can
+drive either the Antigravity (agy) or Claude Code (claude) backend via `backend=`.
 """
 
 import os
@@ -9,20 +10,23 @@ import time
 import shutil
 import sqlite3
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from agy_pipeline import AgyPipeline, AgentTurnResult
+from claude_pipeline import ClaudePipeline
+from pipeline_factory import normalize_backend, DEFAULT_BACKEND
 
 logger = logging.getLogger("AgyManager")
 
 
 class AgyManager:
     """
-    Manager class orchestrating the AgyPipeline backend.
+    Manager class orchestrating an agent CLI pipeline (Antigravity or Claude Code).
     Provides public methods: initialize, send_prompt, status, extract_last_command, and exit.
     """
 
     def __init__(self):
-        self.pipeline: Optional[AgyPipeline] = None
+        self.pipeline: Optional[Union[AgyPipeline, ClaudePipeline]] = None
+        self.backend: Optional[str] = None
         self.last_prompt_output: Optional[str] = None
         self.last_turn_status: Optional[str] = None
 
@@ -57,10 +61,20 @@ class AgyManager:
         skip_permissions: bool = True,
         timeout: float = 30.0,
         fork: bool = False,
-        new_conversation_id: Optional[str] = None
+        new_conversation_id: Optional[str] = None,
+        backend: str = DEFAULT_BACKEND,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+        permission_mode: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Initializes and starts the underlying AgyPipeline to resume a specified conversation_id.
+        Initializes and starts the underlying agent pipeline to resume a specified conversation_id.
+
+        `backend` selects which CLI to drive: 'antigravity'/'agy' (default) or 'claude'/'claude-code'.
+        Forking behaves differently per backend: Antigravity forks by cloning its SQLite/brain
+        state up front into a caller-chosen `new_conversation_id`; Claude Code forks natively via
+        `--resume <id> --fork-session`, so the new session id is only known after the CLI starts
+        and is returned as `conversation_id` in the result.
         """
         if self.pipeline and self.pipeline._running:
             logger.info("Closing existing active pipeline session before initializing new one...")
@@ -69,36 +83,65 @@ class AgyManager:
         self.last_prompt_output = None
         self.last_turn_status = None
 
-        if fork:
-            try:
-                conversation_id = self.fork_conversation(conversation_id, new_conversation_id)
-            except Exception as e:
-                logger.error(f"Failed to fork conversation '{conversation_id}': {e}")
-                return {
-                    "status": "ERROR",
-                    "error": f"Failed to fork conversation: {e}",
-                    "conversation_id": conversation_id
-                }
+        try:
+            resolved_backend = normalize_backend(backend)
+        except ValueError as e:
+            return {"status": "ERROR", "error": str(e), "conversation_id": conversation_id}
 
-        self.pipeline = AgyPipeline(
-            cwd=cwd,
-            skip_permissions=skip_permissions,
-            conversation_id=conversation_id
-        )
+        fork_session = False
+        if fork:
+            if resolved_backend == "antigravity":
+                try:
+                    conversation_id = self.fork_conversation(conversation_id, new_conversation_id)
+                except Exception as e:
+                    logger.error(f"Failed to fork conversation '{conversation_id}': {e}")
+                    return {
+                        "status": "ERROR",
+                        "error": f"Failed to fork conversation: {e}",
+                        "conversation_id": conversation_id
+                    }
+            else:
+                # Claude Code assigns the forked session's ID itself on start().
+                fork_session = True
+
+        # AgyPipeline and ClaudePipeline are independent, self-contained classes with
+        # slightly different constructor kwargs (only Claude has permission_mode/fork_session),
+        # so each backend is constructed explicitly rather than through one shared call.
+        if resolved_backend == "claude":
+            self.pipeline = ClaudePipeline(
+                cwd=cwd,
+                skip_permissions=skip_permissions,
+                model=model,
+                effort=effort,
+                conversation_id=conversation_id,
+                permission_mode=permission_mode,
+                fork_session=fork_session
+            )
+        else:
+            self.pipeline = AgyPipeline(
+                cwd=cwd,
+                skip_permissions=skip_permissions,
+                model=model,
+                effort=effort,
+                conversation_id=conversation_id
+            )
+        self.backend = resolved_backend
 
         try:
             self.pipeline.start(timeout=timeout)
             return {
                 "status": "INITIALIZED",
+                "backend": self.backend,
                 "conversation_id": self.pipeline.conversation_id,
                 "available_tools": self.pipeline.available_tools,
                 "permission_mode": self.pipeline.permission_mode,
                 "cwd": self.pipeline.cwd
             }
         except Exception as e:
-            logger.error(f"Failed to initialize AgyPipeline: {e}")
+            logger.error(f"Failed to initialize {resolved_backend} pipeline: {e}")
             return {
                 "status": "ERROR",
+                "backend": self.backend,
                 "error": str(e),
                 "conversation_id": conversation_id
             }
@@ -142,14 +185,35 @@ class AgyManager:
             "error": turn_result.error
         }
 
-    def extract_last_command(self, conversation_id: Optional[str] = None) -> Dict[str, Any]:
+    def extract_last_command(
+        self,
+        conversation_id: Optional[str] = None,
+        backend: Optional[str] = None,
+        cwd: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Extracts the last user prompt and corresponding agent response from transcript.jsonl.
+        Extracts the last user prompt and corresponding agent response from the
+        backend's on-disk transcript. Dispatches to the backend-specific parser
+        (`backend`, defaulting to the active pipeline's backend, then 'antigravity'
+        for compatibility with existing single-backend callers).
         """
         target_conv_id = conversation_id or (self.pipeline.conversation_id if self.pipeline else None)
         if not target_conv_id:
             return {"error": "No conversation_id provided or available."}
 
+        resolved_backend = backend or self.backend or DEFAULT_BACKEND
+        try:
+            resolved_backend = normalize_backend(resolved_backend)
+        except ValueError as e:
+            return {"error": str(e)}
+
+        if resolved_backend == "claude":
+            target_cwd = cwd or (self.pipeline.cwd if self.pipeline else None) or os.getcwd()
+            return self._extract_last_command_claude(target_conv_id, target_cwd)
+
+        return self._extract_last_command_antigravity(target_conv_id)
+
+    def _extract_last_command_antigravity(self, target_conv_id: str) -> Dict[str, Any]:
         candidates = [
             os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{target_conv_id}/.system_generated/logs/transcript.jsonl"),
             os.path.expanduser(f"~/.gemini/antigravity-ide/brain/{target_conv_id}/.system_generated/logs/transcript.jsonl"),
@@ -213,6 +277,62 @@ class AgyManager:
         except Exception as e:
             return {"error": f"Failed reading transcript: {e}"}
 
+    def _extract_last_command_claude(self, target_conv_id: str, cwd: str) -> Dict[str, Any]:
+        """Reads Claude Code's `~/.claude/projects/<dir>/<session-id>.jsonl` transcript."""
+        config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
+        project_dir = ClaudePipeline.project_dir_for_cwd(cwd)
+        transcript_path = os.path.expanduser(os.path.join(config_dir, "projects", project_dir, f"{target_conv_id}.jsonl"))
+
+        if not os.path.exists(transcript_path):
+            return {"error": f"Transcript file not found for conversation_id={target_conv_id}"}
+
+        def _flatten_text(content_value) -> Optional[str]:
+            if isinstance(content_value, str):
+                return content_value
+            if isinstance(content_value, list):
+                texts = [b.get("text") for b in content_value if isinstance(b, dict) and b.get("type") == "text" and b.get("text")]
+                return "\n".join(texts) if texts else None
+            return None
+
+        last_user_prompt = None
+        last_agent_response = None
+        last_step_index = None
+        step_index = 0
+
+        try:
+            with open(transcript_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+
+                    message = obj.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    step_index += 1
+                    content = message.get("content")
+
+                    if message.get("role") == "user":
+                        text = _flatten_text(content)
+                        if text:
+                            last_user_prompt = text
+                            last_step_index = obj.get("step_index", step_index)
+                    elif message.get("role") == "assistant":
+                        text = _flatten_text(content)
+                        if text:
+                            last_agent_response = text
+
+            return {
+                "conversation_id": target_conv_id,
+                "transcript_path": transcript_path,
+                "last_step_index": last_step_index,
+                "last_user_prompt": last_user_prompt,
+                "last_agent_response": last_agent_response
+            }
+        except Exception as e:
+            return {"error": f"Failed reading transcript: {e}"}
+
     def status(self, mode: str = "process") -> Dict[str, Any]:
         """
         Returns status information depending on mode:
@@ -227,6 +347,7 @@ class AgyManager:
                 "mode": clean_mode,
                 "is_running": False,
                 "status": "UNINITIALIZED",
+                "backend": self.backend,
                 "conversation_id": None
             }
 
@@ -240,6 +361,7 @@ class AgyManager:
                 "mode": "process",
                 "is_running": is_proc_alive,
                 "status": "RUNNING" if is_proc_alive else "STOPPED",
+                "backend": self.backend,
                 "conversation_id": self.pipeline.conversation_id,
                 "available_tools": self.pipeline.available_tools,
                 "permission_mode": self.pipeline.permission_mode,
@@ -280,6 +402,7 @@ class AgyManager:
         try:
             self.pipeline.close()
             self.pipeline = None
+            self.backend = None
             self.last_prompt_output = None
             self.last_turn_status = None
             logger.info(f"Pipeline session {conv_id} exited cleanly.")

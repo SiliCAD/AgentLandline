@@ -40,22 +40,31 @@ def initialize_agent(
     conversation_id: str,
     cwd: str = "",
     fork: bool = False,
-    new_conversation_id: str = ""
+    new_conversation_id: str = "",
+    backend: str = "antigravity",
+    model: str = "",
+    effort: str = ""
 ) -> str:
     """
-    Initialize and resume an agy agent process backend for a specified conversation ID.
-    
+    Initialize and resume an agent process backend for a specified conversation ID.
+
     Args:
-        conversation_id: The conversation ID of the existing agent session to resume (or fork from).
+        conversation_id: The conversation/session ID of the existing agent session to resume (or fork from).
         cwd: Working directory path for the agent process (optional).
         fork: Whether to fork the conversation into a new session (optional).
-        new_conversation_id: Optional custom conversation ID for the fork (auto-generated if omitted).
+        new_conversation_id: Optional custom conversation ID for the fork (Antigravity only; Claude Code assigns its own forked session ID).
+        backend: Which agent CLI to drive: 'antigravity'/'agy' (default) or 'claude'/'claude-code'.
+        model: Optional model name/alias to pass through to the backend CLI.
+        effort: Optional reasoning effort level to pass through to the backend CLI.
     """
     res = manager.initialize(
         conversation_id=conversation_id,
         cwd=cwd if cwd else None,
         fork=fork,
-        new_conversation_id=new_conversation_id if new_conversation_id else None
+        new_conversation_id=new_conversation_id if new_conversation_id else None,
+        backend=backend if backend else "antigravity",
+        model=model if model else None,
+        effort=effort if effort else None
     )
     return json.dumps(res, indent=2)
 
