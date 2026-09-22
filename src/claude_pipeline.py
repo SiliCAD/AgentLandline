@@ -408,6 +408,16 @@ class ClaudePipeline:
                 if recent_questions:
                     self._current_turn_result.questions = recent_questions
 
+            # conversation_id was snapshotted before this turn ran, from whatever
+            # self.conversation_id held at the time - but on the first turn after a
+            # fork (or any resume where Claude Code stays quiet until prompted, see
+            # start()), the real session id is only known once this turn's own
+            # system/init event has been processed. Refresh from the live pipeline
+            # attribute so callers get the actual (possibly new, forked) session id
+            # instead of a stale pre-turn value.
+            if self.conversation_id:
+                self._current_turn_result.conversation_id = self.conversation_id
+
             return self._current_turn_result
 
     def close(self):

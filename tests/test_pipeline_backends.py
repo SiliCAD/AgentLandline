@@ -14,6 +14,7 @@ subprocess integration lives in test_agy_pipeline.py / test_claude_pipeline.py.)
 import sys
 import os
 import json
+import time
 import threading
 from unittest.mock import patch
 
@@ -154,6 +155,45 @@ def test_claude_start_raises_with_stderr_when_process_dies_during_startup():
     with patch("claude_pipeline.subprocess.Popen", return_value=fake_proc):
         with pytest.raises(RuntimeError, match="no conversation found"):
             p.start(timeout=0.2)
+
+
+def test_claude_send_refreshes_conversation_id_after_fork_init_event():
+    """
+    Regression test for a bug found via live testing: forking (--resume <parent>
+    --fork-session) makes Claude Code mint a brand new session id, but that id is
+    only known once the *first turn's own* system/init event has been processed -
+    which, per the start() fix above, can happen only after send() is already
+    running, not during start(). send() used to snapshot conversation_id at the
+    START of the turn (the stale parent id) instead of refreshing it once the
+    turn (and its init event) completed, so callers got the parent id back
+    instead of the real forked session id.
+    """
+    fake_proc = _FakeProc(poll_result=None)  # stays "alive" throughout
+    p = ClaudePipeline(cwd="/tmp", conversation_id="parent-session-id", fork_session=True)
+    p.proc = fake_proc
+    p._running = True
+
+    def simulate_reader_emitting_fork_init_then_result():
+        time.sleep(0.05)  # let send() snapshot the stale conversation_id first
+        ready = threading.Event()
+        p._handle_event({
+            "type": "system", "subtype": "init",
+            "session_id": "forked-new-session-id", "tools": [], "permissionMode": "bypassPermissions"
+        }, ready)
+        p._handle_event({
+            "type": "result", "subtype": "success", "result": "ok",
+            "session_id": "forked-new-session-id", "is_error": False
+        }, ready)
+
+    reader = threading.Thread(target=simulate_reader_emitting_fork_init_then_result, daemon=True)
+    reader.start()
+    result = p.send("hello", timeout=2)
+    reader.join(timeout=1)
+
+    assert result.conversation_id == "forked-new-session-id", (
+        f"expected the refreshed forked session id, got stale value {result.conversation_id!r}"
+    )
+    assert p.conversation_id == "forked-new-session-id"
 
 
 # ---------------------------------------------------------------------------
