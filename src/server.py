@@ -1,13 +1,13 @@
 """
 Main MCP Server Entrypoint for AgentLandline.
-Integrates AgyManager and issue reporter tools.
+Integrates AgentManager and issue reporter tools.
 """
 import json
 import logging
 from typing import Optional
 from mcp.server.fastmcp import FastMCP, Context
 from issue_reporter import IssueReporter
-from agy_manager import AgyManager
+from agent_manager import AgentManager
 
 # Configure logger
 logging.basicConfig(
@@ -16,9 +16,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AgentLandline")
 
-# Initialize FastMCP Server and global AgyManager instance
+# Initialize FastMCP Server and global AgentManager instance
 mcp = FastMCP("AgentLandline")
-manager = AgyManager()
+manager = AgentManager()
 
 
 def get_client_agent_name(ctx: Context = None) -> str:
@@ -40,22 +40,31 @@ def initialize_agent(
     conversation_id: str,
     cwd: str = "",
     fork: bool = False,
-    new_conversation_id: str = ""
+    new_conversation_id: str = "",
+    backend: str = "antigravity",
+    model: str = "",
+    effort: str = ""
 ) -> str:
     """
-    Initialize and resume an agy agent process backend for a specified conversation ID.
-    
+    Initialize and resume an agent process backend for a specified conversation ID.
+
     Args:
-        conversation_id: The conversation ID of the existing agent session to resume (or fork from).
+        conversation_id: The conversation/session ID of the existing agent session to resume (or fork from).
         cwd: Working directory path for the agent process (optional).
         fork: Whether to fork the conversation into a new session (optional).
-        new_conversation_id: Optional custom conversation ID for the fork (auto-generated if omitted).
+        new_conversation_id: Optional custom conversation ID for the fork (Antigravity only; Claude Code assigns its own forked session ID).
+        backend: Which agent CLI to drive: 'antigravity'/'agy' (default) or 'claude'/'claude-code'.
+        model: Optional model name/alias to pass through to the backend CLI.
+        effort: Optional reasoning effort level to pass through to the backend CLI.
     """
     res = manager.initialize(
         conversation_id=conversation_id,
         cwd=cwd if cwd else None,
         fork=fork,
-        new_conversation_id=new_conversation_id if new_conversation_id else None
+        new_conversation_id=new_conversation_id if new_conversation_id else None,
+        backend=backend if backend else "antigravity",
+        model=model if model else None,
+        effort=effort if effort else None
     )
     return json.dumps(res, indent=2)
 
@@ -63,8 +72,8 @@ def initialize_agent(
 @mcp.tool()
 def send_prompt(prompt: str, timeout: float = 120.0) -> str:
     """
-    Send a prompt to the running agy agent session and wait for the response.
-    
+    Send a prompt to the running agent session and wait for the response.
+
     Args:
         prompt: User prompt text to send to the agent.
         timeout: Maximum wait time in seconds for the agent turn.
@@ -76,8 +85,8 @@ def send_prompt(prompt: str, timeout: float = 120.0) -> str:
 @mcp.tool()
 def agent_status(mode: str = "process") -> str:
     """
-    Get status info for the agy agent session.
-    
+    Get status info for the agent session.
+
     Args:
         mode: Status mode:
             - 'process': Check process health, PID, conversation_id, and available tools.
@@ -91,7 +100,7 @@ def agent_status(mode: str = "process") -> str:
 @mcp.tool()
 def exit_agent() -> str:
     """
-    Close and terminate the current agy agent session cleanly.
+    Close and terminate the current agent session cleanly.
     """
     res = manager.exit()
     return json.dumps(res, indent=2)
