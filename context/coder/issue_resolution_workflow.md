@@ -12,8 +12,8 @@ It is designed to govern both:
 
 ### Track A: Direct User Requests (Human-Prompted)
 1. **Understand Intent**: Clarify ambiguous requirements before modifying files.
-2. **Locate Relevant Components**: Determine whether the request targets FastMCP tools (`server.py`), session management (`agy_manager.py`), streaming subprocess bridge (`agy_pipeline.py`), or GitHub integration (`issue_reporter.py`).
-3. **Check Baseline**: Run the unit test suite (`pytest tests/test_issue_reporter.py tests/test_agy_manager.py`) to ensure existing tests are green before starting work.
+2. **Locate Relevant Components**: Determine whether the request targets FastMCP tools (`server.py`), session management (`agent_manager.py`), streaming subprocess bridge (`agy_pipeline.py`), or GitHub integration (`issue_reporter.py`).
+3. **Check Baseline**: Run the unit test suite (`pytest tests/test_issue_reporter.py tests/test_agent_manager.py`) to ensure existing tests are green before starting work.
 
 ### Track B: Autonomous Cross-Agent Collaboration
 1. **Extract Collaborator Context**: Inspect the caller's request, error tracebacks, and any passed session IDs or conversation tokens.
@@ -65,7 +65,7 @@ Every code change must be validated against the repository's test suites before 
 
 1. **Run Unit Tests**:
    ```bash
-   pytest tests/test_issue_reporter.py tests/test_agy_manager.py
+   pytest tests/test_issue_reporter.py tests/test_agent_manager.py
    ```
 2. **Validate Integration Logic (if modifying `agy_pipeline.py`)**:
    Verify that subprocess spawning and JSON streaming remain clean and that timeouts or exceptions do not leave orphaned processes:
@@ -187,7 +187,7 @@ Every PR must follow this standard structure:
 ## 📋 Step-by-Step Coder Execution Checklist
 
 1. [ ] **Inspect Task/Issue**: Parse user prompt or collaborator instructions.
-2. [ ] **Verify Baseline**: Run existing tests (`pytest tests/test_issue_reporter.py tests/test_agy_manager.py`).
+2. [ ] **Verify Baseline**: Run existing tests (`pytest tests/test_issue_reporter.py tests/test_agent_manager.py`).
 3. [ ] **Create Dedicated Branch**: Run `git checkout -b <agent>/<task-desc>` (or branch off parent if stacked).
 4. [ ] **Implement Changes Incrementally**: Commit atomically with agent identity (`git commit -m "..."`).
 5. [ ] **Run Test Suites**: Ensure 100% test passing across modified components.

@@ -1,7 +1,7 @@
 # Multi-Backend Pipeline Architecture & Stream-JSON Protocols
 
 This document details `src/agy_pipeline.py`, `src/claude_pipeline.py`, and
-`src/pipeline_factory.py` — the layer that lets `AgyManager` drive either the **Antigravity CLI
+`src/pipeline_factory.py` — the layer that lets `AgentManager` drive either the **Antigravity CLI
 (`agy`)** or the **Claude Code CLI (`claude`)**, and the two backends' differing stream-json
 protocols.
 
@@ -22,11 +22,11 @@ implemented separately in each file (`claude_pipeline.py` mirrors `agy_pipeline.
 and method names for consistency, but does not import from or subclass it). This keeps
 `agy_pipeline.py` exactly as it was before Claude support existed — nothing outside
 `claude_pipeline.py` and the two callers that opt into it (`pipeline_factory.py`,
-`AgyManager.initialize()`) had to change to add the new backend.
+`AgentManager.initialize()`) had to change to add the new backend.
 
 `ToolExecution` and `AgentTurnResult` (the public per-turn result data models) are defined once
 in each pipeline module — `agy_pipeline.py` keeps its original copy, and `claude_pipeline.py`
-defines its own structurally-identical copy. `AgyManager` and the MCP server only ever access
+defines its own structurally-identical copy. `AgentManager` and the MCP server only ever access
 these by attribute (`.response`, `.status`, `.tool_calls`, ...), so the duplication costs nothing
 at the call site and avoids coupling the two backends through a shared type.
 
@@ -48,7 +48,7 @@ anything else:
 | `agy`, `antigravity`, `antigravity-cli`, `gemini` | `antigravity` | `AgyPipeline` |
 | `claude`, `claude-code`, `claude-cli`, `anthropic` | `claude` | `ClaudePipeline` |
 
-`AgyManager.initialize(..., backend=...)` calls this before constructing a pipeline, so an
+`AgentManager.initialize(..., backend=...)` calls this before constructing a pipeline, so an
 unknown backend name fails fast with a clear error instead of falling through to a default.
 
 ---
@@ -68,7 +68,7 @@ agy --input-format stream-json --output-format stream-json --disable-slash-comma
 - **Transcript fallback**: `~/.gemini/antigravity-{cli,ide}/brain/<conversation_id>/.system_generated/logs/transcript.jsonl`
   (or `$ANTIGRAVITY_APP_DATA_DIR/brain/...`), used by `_extract_recent_questions()` when a
   question doesn't show up as a discrete stream event.
-- **Forking**: `AgyManager.fork_conversation()` clones the conversation's SQLite DB
+- **Forking**: `AgentManager.fork_conversation()` clones the conversation's SQLite DB
   (`~/.gemini/antigravity-cli/conversations/<id>.db`) and its `brain/<id>/` artifacts directory
   onto a new id *before* the pipeline starts — agy has no native "fork on resume" flag.
 
@@ -136,7 +136,7 @@ recovery, `extract_last_command`), never on the critical path of a turn.
 
 ## 5. Manager-level differences
 
-`AgyManager` (`src/agy_manager.py`) is otherwise backend-agnostic — `send_prompt`, `status`, and
+`AgentManager` (`src/agent_manager.py`) is otherwise backend-agnostic — `send_prompt`, `status`, and
 `exit` operate on whichever pipeline instance (`AgyPipeline` or `ClaudePipeline`) is active via
 `self.pipeline`/`self.backend`, accessed only by shared attribute names. `initialize()`
 constructs the right class explicitly (`AgyPipeline(...)` or `ClaudePipeline(...)`) since their
@@ -159,7 +159,7 @@ constructor kwargs aren't identical — only `ClaudePipeline` takes `permission_
 - `tests/test_pipeline_backends.py` — offline unit tests: backend alias resolution, launch-argv
   construction per backend, `ClaudePipeline._handle_event()` fed synthetic stream-json events
   (init / tool_use / tool_result / AskUserQuestion / result, success and error paths),
-  `project_dir_for_cwd()` against the real observed directory name, and `AgyManager.initialize()`
+  `project_dir_for_cwd()` against the real observed directory name, and `AgentManager.initialize()`
   backend dispatch with `pipeline.start()` mocked out (no subprocess spawned).
 - `tests/test_claude_pipeline.py` — live integration test mirroring `test_agy_pipeline.py`;
   spawns a real `claude` subprocess, requires `claude` in `PATH`.

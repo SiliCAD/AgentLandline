@@ -1,5 +1,5 @@
 """
-AgyManager: High-level manager wrapping agent CLI pipelines for orchestration and MCP integration.
+AgentManager: High-level manager wrapping agent CLI pipelines for orchestration and MCP integration.
 Exposes initialize, send_prompt, status, extract_last_command, and exit public methods, and can
 drive either the Antigravity (agy) or Claude Code (claude) backend via `backend=`.
 """
@@ -15,10 +15,10 @@ from agy_pipeline import AgyPipeline, AgentTurnResult
 from claude_pipeline import ClaudePipeline
 from pipeline_factory import normalize_backend, DEFAULT_BACKEND
 
-logger = logging.getLogger("AgyManager")
+logger = logging.getLogger("AgentManager")
 
 
-class AgyManager:
+class AgentManager:
     """
     Manager class orchestrating an agent CLI pipeline (Antigravity or Claude Code).
     Provides public methods: initialize, send_prompt, status, extract_last_command, and exit.
@@ -148,13 +148,13 @@ class AgyManager:
 
     def send_prompt(self, prompt: str, timeout: float = 120.0) -> Dict[str, Any]:
         """
-        Sends a prompt to the running agy session and waits for turn result.
+        Sends a prompt to the running agent session and waits for turn result.
         Returns only the response and metadata from this prompt turn.
         """
         if not self.pipeline:
             return {
                 "status": "ERROR",
-                "error": "AgyPipeline is not initialized. Call initialize() first."
+                "error": "No agent pipeline initialized. Call initialize() first."
             }
 
         turn_result: AgentTurnResult = self.pipeline.send(prompt, timeout=timeout)
@@ -393,7 +393,7 @@ class AgyManager:
 
     def exit(self) -> Dict[str, Any]:
         """
-        Terminates the agy pipeline process cleanly.
+        Terminates the active agent pipeline process cleanly.
         """
         if not self.pipeline:
             return {"status": "SUCCESS", "message": "No active pipeline to close."}

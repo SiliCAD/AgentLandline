@@ -23,13 +23,13 @@ It allows external AI agents (such as Antigravity IDE, Claude Code, Cursor, or c
 AgentLandline/
 ├── src/
 │   ├── server.py           # MCP Server Entrypoint (FastMCP tool definitions)
-│   ├── agy_manager.py      # High-level Orchestration Manager & Transcript Reader (backend-aware)
+│   ├── agent_manager.py    # High-level Orchestration Manager & Transcript Reader (backend-aware)
 │   ├── pipeline_factory.py # Backend name/alias -> pipeline class resolution
 │   ├── agy_pipeline.py     # Antigravity backend: launches `agy` (stream-json) — unchanged
 │   ├── claude_pipeline.py  # Claude Code backend: launches `claude` (stream-json) — independent, self-contained
 │   └── issue_reporter.py   # GitHub Issue Reporter & gh CLI wrapper
 ├── tests/
-│   ├── test_agy_manager.py       # Unit tests for transcript parser & DB forking
+│   ├── test_agent_manager.py     # Unit tests for transcript parser & DB forking
 │   ├── test_pipeline_backends.py # Unit tests for backend selection & stream-json parsing
 │   ├── test_agy_pipeline.py      # Integration test for multi-turn agy sessions
 │   ├── test_claude_pipeline.py   # Integration test for multi-turn claude sessions
@@ -40,7 +40,7 @@ AgentLandline/
 ### Core Components
 
 1. **`src/server.py`**: The FastMCP server hosting tools for client agents. Automatically extracts client agent metadata (`clientInfo`) on initialization.
-2. **`src/agy_manager.py`**: High-level manager (`AgyManager`) that maintains the active pipeline instance (whichever backend), and provides backend-aware transcript search.
+2. **`src/agent_manager.py`**: High-level manager (`AgentManager`) that maintains the active pipeline instance (whichever backend), and provides backend-aware transcript search. Named generically (not `agy_manager`) because it orchestrates any registered backend, not just Antigravity.
 3. **`src/agy_pipeline.py`**: Non-blocking subprocess bridge (`AgyPipeline`) for the Antigravity backend — untouched by the Claude Code addition.
 4. **`src/claude_pipeline.py`**: Non-blocking subprocess bridge (`ClaudePipeline`) for the Claude Code backend — a separate, self-contained module (no shared base class with `agy_pipeline.py`) implementing Claude Code's own stream-json protocol (Anthropic-Messages-API-shaped events, vs. agy's `event`-keyed protocol).
 5. **`src/pipeline_factory.py`**: Resolves a backend name/alias (`'agy'`, `'antigravity'`, `'claude'`, `'claude-code'`, ...) to its pipeline class.
@@ -97,20 +97,20 @@ Add **AgentLandline** to your MCP client configuration file (e.g., `~/.gemini/an
 | `send_prompt` | `prompt` *(str)*<br>`timeout` *(float, default: 120.0)* | Sends a prompt to the active session (whichever backend was initialized) and returns the agent's turn response and tool metrics. |
 | `agent_status` | `mode` *(str, default: 'process')* | Queries status. Modes: `process` (PID, health & active backend), `output` (live output buffer), `transcript` (last turn transcript). |
 | `exit_agent` | *None* | Gracefully terminates and cleans up the current agent process. |
-| `report_issue` | `title` *(str)*<br>`body` *(str)*<br>`label` *(str)*<br>`agent_model` *(str)*<br>`session_id` *(str)* | Creates a GitHub issue with formatted metadata, smart typography/typo label matching (`new_lable` <-> `new lable`), and auto-creation of missing labels with random colors. |
+| `report_issue` | `title` *(str)*<br>`body` *(str)*<br>`label` *(str)*<br>`repo` *(str, default: 'SiliCAD/AgentLandline')*<br>`agent_model` *(str)*<br>`session_id` *(str)* | Creates a GitHub issue in the target repository (default: `SiliCAD/AgentLandline`) with formatted metadata, smart typography/typo label matching (`new_lable` <-> `new lable`), and auto-creation of missing labels with random colors. |
 
 ---
 
 ## 🐍 Python Library Usage
 
-You can also use `AgyManager`, or a backend pipeline directly, in Python scripts.
+You can also use `AgentManager`, or a backend pipeline directly, in Python scripts.
 
-### Using `AgyManager` with either backend
+### Using `AgentManager` with either backend
 
 ```python
-from agy_manager import AgyManager
+from agent_manager import AgentManager
 
-manager = AgyManager()
+manager = AgentManager()
 
 # Antigravity (default)
 manager.initialize(conversation_id="my-session", backend="antigravity")
@@ -164,8 +164,8 @@ python src/agy_pipeline.py --model gemini-3.6-flash
 Run the included test suites to verify transcript extraction and pipeline functionality:
 
 ```bash
-# Unit tests: transcript extraction & DB forking (AgyManager)
-pytest tests/test_agy_manager.py -v
+# Unit tests: transcript extraction & DB forking (AgentManager)
+pytest tests/test_agent_manager.py -v
 
 # Unit tests: backend selection & stream-json event parsing (offline, no subprocess)
 pytest tests/test_pipeline_backends.py -v

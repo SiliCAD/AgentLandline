@@ -1,12 +1,12 @@
 """
 Unit tests for the multi-backend plumbing: pipeline_factory.py (backend name/alias
-resolution), claude_pipeline.py (Claude Code's stream-json protocol), and AgyManager's
+resolution), claude_pipeline.py (Claude Code's stream-json protocol), and AgentManager's
 backend selection.
 
 AgyPipeline (Antigravity) and ClaudePipeline (Claude Code) are independent, self-contained
 classes with no shared base class - AgyPipeline is untouched from before Claude support was
 added. These are pure offline tests: they feed synthetic stream-json events directly into
-ClaudePipeline._handle_event() and drive AgyManager.initialize() with the underlying
+ClaudePipeline._handle_event() and drive AgentManager.initialize() with the underlying
 pipeline.start() mocked out, so no `agy` or `claude` subprocess is ever spawned. (Live
 subprocess integration lives in test_agy_pipeline.py / test_claude_pipeline.py.)
 """
@@ -25,7 +25,7 @@ import pytest
 from claude_pipeline import ClaudePipeline, AgentTurnResult
 from pipeline_factory import create_pipeline, normalize_backend
 from agy_pipeline import AgyPipeline
-from agy_manager import AgyManager
+from agent_manager import AgentManager
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +314,11 @@ def test_project_dir_for_cwd_matches_claude_code_layout():
 
 
 # ---------------------------------------------------------------------------
-# AgyManager backend selection (pipeline.start() mocked out, no subprocess)
+# AgentManager backend selection (pipeline.start() mocked out, no subprocess)
 # ---------------------------------------------------------------------------
 
 def test_manager_initialize_defaults_to_antigravity():
-    manager = AgyManager()
+    manager = AgentManager()
     with patch.object(AgyPipeline, "start", return_value=None):
         res = manager.initialize(conversation_id="conv-1", cwd="/tmp")
     assert res["status"] == "INITIALIZED"
@@ -327,7 +327,7 @@ def test_manager_initialize_defaults_to_antigravity():
 
 
 def test_manager_initialize_selects_claude_backend():
-    manager = AgyManager()
+    manager = AgentManager()
     with patch.object(ClaudePipeline, "start", return_value=None):
         res = manager.initialize(conversation_id="conv-1", cwd="/tmp", backend="claude-code", model="sonnet")
     assert res["status"] == "INITIALIZED"
@@ -337,14 +337,14 @@ def test_manager_initialize_selects_claude_backend():
 
 
 def test_manager_initialize_unknown_backend_returns_error():
-    manager = AgyManager()
+    manager = AgentManager()
     res = manager.initialize(conversation_id="conv-1", cwd="/tmp", backend="gpt4")
     assert res["status"] == "ERROR"
     assert manager.pipeline is None
 
 
 def test_manager_extract_last_command_claude_backend(tmp_path):
-    manager = AgyManager()
+    manager = AgentManager()
     manager.backend = "claude"
 
     cwd = "/Users/vs/function/AgentLandline"
@@ -377,7 +377,7 @@ def test_manager_extract_last_command_claude_backend(tmp_path):
 
 
 def test_manager_fork_true_with_claude_backend_sets_fork_session_flag():
-    manager = AgyManager()
+    manager = AgentManager()
     captured = {}
 
     def fake_start(self, timeout=30.0):

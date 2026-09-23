@@ -12,11 +12,11 @@ Welcome to the **AgentLandline** developer and AI agent context specification. T
 AgentLandline/
 ├── src/
 │   ├── server.py             # FastMCP server entry point & tool dispatch
-│   ├── agy_manager.py        # High-level session orchestration, DB fork, & transcript parsing
+│   ├── agent_manager.py      # High-level session orchestration, DB fork, & transcript parsing
 │   ├── agy_pipeline.py       # Subprocess bridge launching agy (stream-json bidirectional pipes)
 │   └── issue_reporter.py     # GitHub Issue reporter with smart label normalization
 ├── tests/
-│   ├── test_agy_manager.py   # Unit tests for conversation database and transcript parsing
+│   ├── test_agent_manager.py # Unit tests for conversation database and transcript parsing
 │   ├── test_agy_pipeline.py  # Integration test for multi-turn streaming communication
 │   └── test_issue_reporter.py# Unit tests for fuzzy label matching and issue generation
 ├── scripts/

@@ -1,10 +1,10 @@
 """
 Backend registry for AgentLandline agent pipelines.
 Resolves a human-friendly backend name/alias (e.g. 'claude', 'agy') to a
-pipeline class so AgyManager can construct the right one. AgyPipeline and
+pipeline class so AgentManager can construct the right one. AgyPipeline and
 ClaudePipeline are independent, self-contained modules (no shared base
 class) with slightly different constructor kwargs, so this module only
-does name resolution; AgyManager builds each backend's kwargs itself.
+does name resolution; AgentManager builds each backend's kwargs itself.
 """
 
 from typing import Dict, Type, Optional, Union

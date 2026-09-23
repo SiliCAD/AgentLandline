@@ -1,13 +1,13 @@
 """
 Main MCP Server Entrypoint for AgentLandline.
-Integrates AgyManager and issue reporter tools.
+Integrates AgentManager and issue reporter tools.
 """
 import json
 import logging
 from typing import Optional
 from mcp.server.fastmcp import FastMCP, Context
 from issue_reporter import IssueReporter
-from agy_manager import AgyManager
+from agent_manager import AgentManager
 
 # Configure logger
 logging.basicConfig(
@@ -16,9 +16,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AgentLandline")
 
-# Initialize FastMCP Server and global AgyManager instance
+# Initialize FastMCP Server and global AgentManager instance
 mcp = FastMCP("AgentLandline")
-manager = AgyManager()
+manager = AgentManager()
 
 
 def get_client_agent_name(ctx: Context = None) -> str:
@@ -72,8 +72,8 @@ def initialize_agent(
 @mcp.tool()
 def send_prompt(prompt: str, timeout: float = 120.0) -> str:
     """
-    Send a prompt to the running agy agent session and wait for the response.
-    
+    Send a prompt to the running agent session and wait for the response.
+
     Args:
         prompt: User prompt text to send to the agent.
         timeout: Maximum wait time in seconds for the agent turn.
@@ -85,8 +85,8 @@ def send_prompt(prompt: str, timeout: float = 120.0) -> str:
 @mcp.tool()
 def agent_status(mode: str = "process") -> str:
     """
-    Get status info for the agy agent session.
-    
+    Get status info for the agent session.
+
     Args:
         mode: Status mode:
             - 'process': Check process health, PID, conversation_id, and available tools.
@@ -100,7 +100,7 @@ def agent_status(mode: str = "process") -> str:
 @mcp.tool()
 def exit_agent() -> str:
     """
-    Close and terminate the current agy agent session cleanly.
+    Close and terminate the current agent session cleanly.
     """
     res = manager.exit()
     return json.dumps(res, indent=2)

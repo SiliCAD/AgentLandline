@@ -3,7 +3,7 @@ ClaudePipeline: Robust headless backend pipeline for communicating with the Clau
 Supports multi-turn conversations, tool call tracking, question detection, and streaming event hooks.
 
 Self-contained mirror of AgyPipeline (src/agy_pipeline.py) for the Claude Code backend: same
-public interface (start/send/close, ToolExecution/AgentTurnResult result shapes) so AgyManager
+public interface (start/send/close, ToolExecution/AgentTurnResult result shapes) so AgentManager
 can drive either CLI interchangeably, but built independently on top of Claude Code's own
 bidirectional stream-json protocol rather than sharing implementation with AgyPipeline.
 """
