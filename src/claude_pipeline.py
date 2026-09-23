@@ -142,21 +142,34 @@ class ClaudePipeline:
             cmd.extend(self.extra_args)
         return cmd
 
+    # Non-credential variables the claude CLI process may legitimately need to
+    # run at all. Everything else is left out by default (allowlist, not a
+    # blocklist of known-bad variables) so this can't be bypassed by a
+    # credential-passing mechanism this pipeline doesn't already know about.
+    _ENV_PASSTHROUGH_KEYS = frozenset({
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR",
+        "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    })
+
     def _build_env(self) -> Dict[str, str]:
         """
-        Builds a sanitized environment dictionary for launching the claude CLI.
-        Strips environment variables that leak from parent Claude Desktop / Claude Code
-        sessions (such as CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, socket tokens, etc.),
-        which cause the child claude process to incorrectly assume it is embedded in
-        a desktop harness and fail standard OAuth authentication.
+        Builds a minimal, allowlisted environment for launching the claude CLI.
+
+        This pipeline is meant to drive the CLI's own already-authenticated login
+        session (`claude login`, OAuth/keychain-backed - the same account the
+        caller is already signed into on this machine), the same way AgyPipeline
+        drives `agy` under whatever account it's already logged into. It must
+        never silently fall back to a separate Anthropic API key/billing account.
+
+        Rather than stripping specific known-bad variables (ANTHROPIC_API_KEY,
+        ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, cloud-provider routing flags,
+        harness variables that leak in when this pipeline itself runs nested
+        inside a Claude Code/Desktop process tree, ...), only a small, explicit
+        set of non-credential variables the CLI needs to function is passed
+        through. This also covers credential-bypass mechanisms not in that list.
         """
-        env = os.environ.copy()
-        for k in list(env.keys()):
-            if k.startswith("CLAUDE") or "CFBundle" in k:
-                del env[k]
-            elif k == "ANTHROPIC_BASE_URL" and not env.get("ANTHROPIC_API_KEY"):
-                del env[k]
-        return env
+        current = os.environ
+        return {k: current[k] for k in self._ENV_PASSTHROUGH_KEYS if k in current}
 
     def start(self, timeout: float = 30.0):
         """Starts the claude background process and waits for the 'system'/'init' event."""
