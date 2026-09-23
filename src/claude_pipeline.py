@@ -142,6 +142,22 @@ class ClaudePipeline:
             cmd.extend(self.extra_args)
         return cmd
 
+    def _build_env(self) -> Dict[str, str]:
+        """
+        Builds a sanitized environment dictionary for launching the claude CLI.
+        Strips environment variables that leak from parent Claude Desktop / Claude Code
+        sessions (such as CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, socket tokens, etc.),
+        which cause the child claude process to incorrectly assume it is embedded in
+        a desktop harness and fail standard OAuth authentication.
+        """
+        env = os.environ.copy()
+        for k in list(env.keys()):
+            if k.startswith("CLAUDE") or "CFBundle" in k:
+                del env[k]
+            elif k == "ANTHROPIC_BASE_URL" and not env.get("ANTHROPIC_API_KEY"):
+                del env[k]
+        return env
+
     def start(self, timeout: float = 30.0):
         """Starts the claude background process and waits for the 'system'/'init' event."""
         if self._running:
@@ -153,6 +169,7 @@ class ClaudePipeline:
         self.proc = subprocess.Popen(
             cmd,
             cwd=self.cwd,
+            env=self._build_env(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

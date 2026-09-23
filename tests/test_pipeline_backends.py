@@ -79,6 +79,36 @@ def test_claude_command_uses_permission_mode_when_not_skipping():
     assert "--permission-mode" in cmd and "plan" in cmd
 
 
+def test_claude_build_env_sanitizes_leaked_variables():
+    p = ClaudePipeline(cwd="/tmp")
+    with patch.dict(os.environ, {
+        "CLAUDECODE": "1",
+        "CLAUDE_CODE_ENTRYPOINT": "claude-desktop",
+        "CLAUDE_CODE_SESSION_ID": "xyz",
+        "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/sock",
+        "__CFBundleIdentifier": "com.anthropic.claudefordesktop",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "SAFE_VAR": "keep_me"
+    }, clear=True):
+        clean = p._build_env()
+        assert "CLAUDECODE" not in clean
+        assert "CLAUDE_CODE_ENTRYPOINT" not in clean
+        assert "CLAUDE_CODE_SESSION_ID" not in clean
+        assert "CLAUDE_CODE_MESSAGING_SOCKET" not in clean
+        assert "__CFBundleIdentifier" not in clean
+        assert "ANTHROPIC_BASE_URL" not in clean
+        assert clean["SAFE_VAR"] == "keep_me"
+
+    # If ANTHROPIC_API_KEY is explicitly provided, ANTHROPIC_BASE_URL should remain
+    with patch.dict(os.environ, {
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+        "ANTHROPIC_BASE_URL": "https://custom.endpoint.com"
+    }, clear=True):
+        clean = p._build_env()
+        assert clean["ANTHROPIC_API_KEY"] == "sk-ant-test"
+        assert clean["ANTHROPIC_BASE_URL"] == "https://custom.endpoint.com"
+
+
 # ---------------------------------------------------------------------------
 # ClaudePipeline.start() lifecycle (mocked subprocess.Popen, no real `claude`)
 #
