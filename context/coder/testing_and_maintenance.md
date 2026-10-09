@@ -11,7 +11,7 @@ AgentLandline uses **`pytest`** as its primary test runner. The test suite is di
 ```
 tests/
 ├── test_issue_reporter.py  # Unit: Label normalization, fuzzy matching, and mock gh calls
-├── test_agy_manager.py     # Unit: SQLite conversation cloning, transcript parsing
+├── test_agent_manager.py   # Unit: SQLite conversation cloning, transcript parsing
 └── test_agy_pipeline.py    # Integration: Live multi-turn agy session bridge & memory
 ```
 
@@ -21,7 +21,7 @@ tests/
 
 ### Run All Unit Tests (Fast, Offline)
 ```bash
-pytest tests/test_issue_reporter.py tests/test_agy_manager.py
+pytest tests/test_issue_reporter.py tests/test_agent_manager.py
 ```
 
 ### Run Specific Test Suites
@@ -31,9 +31,9 @@ pytest tests/test_issue_reporter.py tests/test_agy_manager.py
    ```
    *Validates label string normalization (`"new_lable"` -> `"new lable"`), alphanumeric stripping, typo tolerance, mock `gh issue create` invocations, and auto-label creation.*
 
-2. **AgyManager & Transcript Reader**:
+2. **AgentManager & Transcript Reader**:
    ```bash
-   pytest tests/test_agy_manager.py -v
+   pytest tests/test_agent_manager.py -v
    ```
    *Validates SQLite conversation DB forking (`fork_conversation`), trajectory cloning, and reading JSONL transcripts.*
 

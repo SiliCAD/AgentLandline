@@ -1,5 +1,5 @@
 """
-Test suite for AgyManager.
+Test suite for AgentManager.
 Verifies extract_last_command correctly parses long transcript files (>100 lines) without dropping user prompt.
 """
 
@@ -10,11 +10,11 @@ import tempfile
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from agy_manager import AgyManager
+from agent_manager import AgentManager
 
 
 def test_extract_last_command_long_turn(tmp_path=None):
-    manager = AgyManager()
+    manager = AgentManager()
 
     # Create temporary transcript file
     if tmp_path is None:
@@ -81,7 +81,7 @@ def test_fork_conversation():
     import shutil
     from unittest.mock import patch
 
-    manager = AgyManager()
+    manager = AgentManager()
     temp_dir = tempfile.mkdtemp()
     conv_dir = os.path.join(temp_dir, "conversations")
     brain_dir = os.path.join(temp_dir, "brain", "parent-123", ".system_generated", "logs")

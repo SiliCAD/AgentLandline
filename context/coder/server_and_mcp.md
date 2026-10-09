@@ -28,8 +28,8 @@ This document details the FastMCP server architecture, tool contracts, parameter
               │                            │
               ▼                            ▼
 ┌───────────────────────────┐ ┌──────────────────────────┐
-│        AgyManager         │ │      IssueReporter       │
-│     src/agy_manager.py    │ │   src/issue_reporter.py  │
+│       AgentManager        │ │      IssueReporter       │
+│    src/agent_manager.py   │ │   src/issue_reporter.py  │
 │  (Session & DB Forking)   │ │  (Smart Label Matching)  │
 └─────────────┬─────────────┘ └──────────────────────────┘
               │
