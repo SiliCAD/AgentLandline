@@ -11,9 +11,9 @@ import shutil
 import sqlite3
 import logging
 from typing import Optional, Dict, Any, List, Union
-from agy_pipeline import AgyPipeline, AgentTurnResult
-from claude_pipeline import ClaudePipeline
-from pipeline_factory import normalize_backend, DEFAULT_BACKEND
+from .agy_pipeline import AgyPipeline, AgentTurnResult
+from .claude_pipeline import ClaudePipeline
+from .pipeline_factory import normalize_backend, DEFAULT_BACKEND
 
 logger = logging.getLogger("AgentManager")
 

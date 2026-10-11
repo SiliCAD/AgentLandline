@@ -12,7 +12,7 @@ import time
 # Ensure src is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from claude_pipeline import ClaudePipeline
+from agentlandline.claude_pipeline import ClaudePipeline
 
 def test_multi_turn_and_tools():
     print("========================================")

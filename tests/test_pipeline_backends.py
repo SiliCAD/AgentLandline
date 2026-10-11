@@ -22,10 +22,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 import pytest
 
-from claude_pipeline import ClaudePipeline, AgentTurnResult
-from pipeline_factory import create_pipeline, normalize_backend
-from agy_pipeline import AgyPipeline
-from agent_manager import AgentManager
+from agentlandline.claude_pipeline import ClaudePipeline, AgentTurnResult
+from agentlandline.pipeline_factory import create_pipeline, normalize_backend
+from agentlandline.agy_pipeline import AgyPipeline
+from agentlandline.agent_manager import AgentManager
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ def test_claude_start_does_not_raise_when_init_never_arrives_but_process_is_aliv
     """A live-but-quiet process (the --resume case) must not be treated as a startup failure."""
     fake_proc = _FakeProc(poll_result=None)  # still running
     p = ClaudePipeline(cwd="/tmp", conversation_id="some-session")
-    with patch("claude_pipeline.subprocess.Popen", return_value=fake_proc):
+    with patch("agentlandline.claude_pipeline.subprocess.Popen", return_value=fake_proc):
         p.start(timeout=0.2)  # must return normally, not raise TimeoutError
     assert p._running is True
     assert p.proc is fake_proc
@@ -199,7 +199,7 @@ def test_claude_start_raises_with_stderr_when_process_dies_during_startup():
     """A process that actually exits during startup (bad args, auth failure, ...) must still raise."""
     fake_proc = _FakeProc(poll_result=1, stderr_text="Error: no conversation found with session ID: bogus")
     p = ClaudePipeline(cwd="/tmp", conversation_id="bogus")
-    with patch("claude_pipeline.subprocess.Popen", return_value=fake_proc):
+    with patch("agentlandline.claude_pipeline.subprocess.Popen", return_value=fake_proc):
         with pytest.raises(RuntimeError, match="no conversation found"):
             p.start(timeout=0.2)
 

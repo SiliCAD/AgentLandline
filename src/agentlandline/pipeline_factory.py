@@ -9,8 +9,8 @@ does name resolution; AgentManager builds each backend's kwargs itself.
 
 from typing import Dict, Type, Optional, Union
 
-from agy_pipeline import AgyPipeline
-from claude_pipeline import ClaudePipeline
+from .agy_pipeline import AgyPipeline
+from .claude_pipeline import ClaudePipeline
 
 DEFAULT_BACKEND = "antigravity"
 

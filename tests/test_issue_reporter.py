@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from issue_reporter import IssueReporter
+from agentlandline.issue_reporter import IssueReporter
 
 
 def test_normalize_label_text():
@@ -239,7 +239,7 @@ def test_create_issue_custom_repo():
 
 def test_server_report_issue_tool_passes_repo():
     """Verifies that server.report_issue passes repo to IssueReporter.create_issue."""
-    import server
+    from agentlandline import server
 
     with patch.object(IssueReporter, "create_issue", return_value="https://github.com/custom/repo/issues/1") as mock_create:
         res = server.report_issue(
