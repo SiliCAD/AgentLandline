@@ -39,6 +39,12 @@ landline up run.json
      and how replying and `message_agent` work.
   4. The agent's final response is logged as a message back to the sender (`caused_by` = the message
      it answers). With `wait=True`, the caller gets this reply back.
+- **Spawning**: `Hub.spawn(spec)` starts an agent in a running hub (socket op `spawn`, `landline spawn`).
+  It gets an inbox and worker like the others, run.json is rewritten, and subscribers get an
+  `agent_added` event. Agents already introduced are told about newcomers once, at the start of their
+  next message (`New agents have joined the session:` + name and role); a new agent's intro lists
+  everyone. Names must match `[A-Za-z][A-Za-z0-9_-]{0,31}` and can't be `user`. Agents are always read
+  through `_slots()`, a locked snapshot, because spawning mutates `hub.agents` from another thread.
 - Sending to `'user'` only records the message, since there is no inbox to deliver it to.
 - **Wait-cycle guard**: the hub tracks which agent is waiting on which. If A is waiting on B and B
   tries to wait on A (directly or through a longer chain), B gets a `HubError` explaining the
@@ -85,7 +91,8 @@ Copy the transcripts of runs worth keeping.
 | `turn_end` | `ok`, `duration_s`, `usage` |
 
 The hub adds `agent` and `ts` to each one, and also emits `message` (a full log record), `turn_start`
-(`message_id`) and `idle`. Live events are not persisted.
+(`message_id`), `idle`, and `agent_added` (`info`: the new agent's `list` entry). The `session` event
+carries `model`: the model in use (claude reports it at startup; agy's comes from its settings). Live events are not persisted.
 
 **Reasoning visibility (verified against claude 2.1.x and agy 1.3.x):**
 - agy streams only a thinking token count, but writes each model step's `thinking` text to its
@@ -104,9 +111,11 @@ One JSON request line per connection, answered with one JSON line (`subscribe` k
 {"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true, "timeout": null}
 {"op": "list"}
 {"op": "messages"}
+{"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "..."}
 {"op": "subscribe"}
 ```
 
+`spawn` replies once the agent is up (or failed to start), with `"agent"`: its `list` entry.
 Replies carry `"ok": true|false` (`"error"` when false). `subscribe` first returns a snapshot
 (`run`, `agents`), then one event per line until the client disconnects. Starting a second hub on a
 socket that is in use fails. A stale socket file left by a crashed hub is removed on start.

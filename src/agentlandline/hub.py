@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import queue
+import re
 import socket
 import socketserver
 import threading
@@ -36,6 +37,7 @@ from .pipeline_factory import normalize_backend
 logger = logging.getLogger("AgentLandlineHub")
 
 USER = "user"
+AGENT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 
 
 def landline_home() -> str:
@@ -66,9 +68,14 @@ class AgentSpec:
 
     @classmethod
     def from_dict(cls, name: str, data: Dict[str, Any]) -> "AgentSpec":
+        if not AGENT_NAME.match(name or "") or name == USER:
+            raise HubError(f"Invalid agent name '{name}': use letters, digits, - or _ (start with a letter), and not '{USER}'.")
         known = {k: data[k] for k in ("backend", "model", "effort", "cwd", "role", "session_id") if data.get(k) is not None}
         spec = cls(name=name, **known)
-        spec.backend = normalize_backend(spec.backend)
+        try:
+            spec.backend = normalize_backend(spec.backend)
+        except ValueError as e:
+            raise HubError(str(e))
         if spec.cwd:
             spec.cwd = os.path.abspath(os.path.expanduser(spec.cwd))
         return spec
@@ -97,6 +104,8 @@ def load_config(path: str) -> Dict[str, Any]:
     for name in agents:
         if name == USER:
             raise HubError(f"{path}: '{USER}' is reserved and can't be an agent name")
+    # A run's own run.json (written by the hub) is also a valid config: it lists
+    # every agent, including ones spawned while it ran, with their session ids.
     return {"run": data.get("run"), "agents": [AgentSpec.from_dict(n, a or {}) for n, a in agents.items()]}
 
 
@@ -116,7 +125,15 @@ class _AgentSlot:
         self.current_trigger: Optional[str] = None  # message id that started the running turn
         self.busy = False
         self.introduced = False
+        self.known_agents: set = set()  # other agents this agent has been told about
         self.reported_model: Optional[str] = None  # what the CLI says it is running
+        # Session id from the CLI's init event. The pipelines notify listeners before
+        # they store it themselves, so the hub keeps its own copy for run.json.
+        self.reported_session: Optional[str] = None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        return self.pipeline.conversation_id or self.reported_session or self.spec.session_id
         self.thread: Optional[threading.Thread] = None
 
 
@@ -142,10 +159,20 @@ class Hub:
         self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
         self._lock = threading.Lock()
         self._waiting_on: Dict[str, str] = {}  # agent -> agent whose reply it is waiting for
+        self._starting: set = set()  # names of agents being spawned right now
+        self._run_file_lock = threading.Lock()  # run.json is rewritten from several threads
         self.agents: Dict[str, _AgentSlot] = {}
         for spec in specs:
-            env = {"LANDLINE_AGENT": spec.name, "LANDLINE_SOCKET": self.socket_path, "LANDLINE_RUN": self.run_id}
-            self.agents[spec.name] = _AgentSlot(spec, self._pipeline_factory(spec, env))
+            self.agents[spec.name] = self._new_slot(spec)
+
+    def _new_slot(self, spec: AgentSpec) -> _AgentSlot:
+        env = {"LANDLINE_AGENT": spec.name, "LANDLINE_SOCKET": self.socket_path, "LANDLINE_RUN": self.run_id}
+        return _AgentSlot(spec, self._pipeline_factory(spec, env))
+
+    def _slots(self) -> List[_AgentSlot]:
+        """Snapshot of the agents, safe to iterate while another thread spawns one."""
+        with self._lock:
+            return list(self.agents.values())
 
     # ------------------------------------------------------------------ setup
 
@@ -171,8 +198,7 @@ class Hub:
 
         def _start(name: str, slot: _AgentSlot):
             try:
-                slot.pipeline.add_event_listener(lambda raw: self._on_raw_event(name, raw))
-                slot.pipeline.start(timeout=self.START_TIMEOUTS.get(slot.spec.backend, 60.0))
+                self._start_pipeline(slot)
             except Exception as e:
                 errors[name] = str(e)
 
@@ -185,14 +211,53 @@ class Hub:
             self.stop()
             raise HubError("; ".join(f"{name}: {err}" for name, err in errors.items()))
 
-        for name, slot in self.agents.items():
-            slot.thread = threading.Thread(target=self._worker, args=(slot,), name=f"landline-{name}", daemon=True)
-            slot.thread.start()
+        for slot in self._slots():
+            self._start_worker(slot)
         self._write_run_file()
         logger.info(f"Hub {self.run_id} started with agents {list(self.agents)}")
 
+    def _start_pipeline(self, slot: _AgentSlot):
+        slot.pipeline.add_event_listener(lambda raw: self._on_raw_event(slot.spec.name, raw, slot))
+        slot.pipeline.start(timeout=self.START_TIMEOUTS.get(slot.spec.backend, 60.0))
+
+    def _start_worker(self, slot: _AgentSlot):
+        slot.thread = threading.Thread(target=self._worker, args=(slot,), name=f"landline-{slot.spec.name}", daemon=True)
+        slot.thread.start()
+
+    def spawn(self, spec: AgentSpec) -> Dict[str, Any]:
+        """
+        Starts a new agent in the running hub. The other agents are told about
+        it with their next message. Returns its list_agents() entry.
+        """
+        # Only the name is reserved under the lock, so several agents can start at once.
+        with self._lock:
+            if spec.name in self.agents or spec.name in self._starting:
+                raise HubError(f"An agent named '{spec.name}' already exists.")
+            self._starting.add(spec.name)
+        try:
+            slot = self._new_slot(spec)
+            try:
+                self._start_pipeline(slot)
+            except Exception as e:
+                try:
+                    slot.pipeline.close()
+                except Exception:
+                    pass
+                raise HubError(f"Couldn't start '{spec.name}': {e}")
+            with self._lock:
+                self.agents[spec.name] = slot
+        finally:
+            with self._lock:
+                self._starting.discard(spec.name)
+        self._start_worker(slot)
+        self._write_run_file()
+        info = self._agent_info(slot)
+        self._emit({"kind": "agent_added", "agent": spec.name, "info": info})
+        logger.info(f"Spawned agent {spec.name} ({spec.backend})")
+        return info
+
     def stop(self):
-        for slot in self.agents.values():
+        for slot in self._slots():
             slot.inbox.put(None)
             try:
                 slot.pipeline.close()
@@ -221,11 +286,12 @@ class Hub:
             except Exception as e:
                 logger.debug(f"Subscriber error: {e}")
 
-    def _on_raw_event(self, name: str, raw: Dict[str, Any]):
-        slot = self.agents[name]
+    def _on_raw_event(self, name: str, raw: Dict[str, Any], slot: Optional[_AgentSlot] = None):
+        slot = slot or self.agents[name]
         for event in normalize(slot.spec.backend, raw):
             if event["kind"] == "session":
                 slot.reported_model = event.get("model") or slot.reported_model
+                slot.reported_session = event.get("session_id") or slot.reported_session
                 event = {**event, "model": self.model_in_use(slot)}
                 self._write_run_file()
             self._emit({**event, "agent": name})
@@ -331,15 +397,23 @@ class Hub:
                 self._emit({"kind": "idle", "agent": slot.spec.name})
                 delivery.done.set()
 
+    @staticmethod
+    def _describe(slot: _AgentSlot) -> str:
+        return f"- {slot.spec.name}" + (f": {slot.spec.role}" if slot.spec.role else "")
+
     def _frame(self, slot: _AgentSlot, record: Dict[str, Any]) -> str:
         header = f"[landline message {record['id']} from {record['from']}]\n"
+        others_now = [s for s in self._slots() if s is not slot]
         if slot.introduced:
-            return header + record["text"]
+            joined = [s for s in others_now if s.spec.name not in slot.known_agents]
+            slot.known_agents.update(s.spec.name for s in joined)
+            if not joined:
+                return header + record["text"]
+            note = "New agents have joined the session:\n" + "\n".join(self._describe(s) for s in joined) + "\n\n"
+            return note + header + record["text"]
         slot.introduced = True
-        others = "\n".join(
-            f"- {s.spec.name}" + (f": {s.spec.role}" if s.spec.role else "")
-            for s in self.agents.values() if s is not slot
-        )
+        slot.known_agents = {s.spec.name for s in others_now}
+        others = "\n".join(self._describe(s) for s in others_now)
         intro = (
             f"You are agent '{slot.spec.name}' in a multi-agent session."
             + (f" Your role: {slot.spec.role}" if slot.spec.role else "")
@@ -367,18 +441,21 @@ class Hub:
             return AgyPipeline.default_model()
         return None
 
-    def list_agents(self) -> List[Dict[str, Any]]:
-        return [{
-            "name": name,
+    def _agent_info(self, slot: _AgentSlot) -> Dict[str, Any]:
+        return {
+            "name": slot.spec.name,
             "backend": slot.spec.backend,
             "model": self.model_in_use(slot),
             "effort": slot.spec.effort,
             "role": slot.spec.role,
-            "session_id": slot.pipeline.conversation_id,
+            "session_id": slot.session_id,
             "transcript": slot.pipeline.transcript_path(),
             "busy": slot.busy,
             "queued": slot.inbox.qsize(),
-        } for name, slot in self.agents.items()]
+        }
+
+    def list_agents(self) -> List[Dict[str, Any]]:
+        return [self._agent_info(slot) for slot in self._slots()]
 
     def _write_run_file(self):
         data = {
@@ -388,17 +465,18 @@ class Hub:
             "messages": self.log.path,
             "agents": {
                 name: {**{k: v for k, v in asdict(slot.spec).items() if k != "name"},
-                       "session_id": slot.pipeline.conversation_id or slot.spec.session_id,
+                       "session_id": slot.session_id,
                        "model_in_use": self.model_in_use(slot),
                        "transcript": slot.pipeline.transcript_path()}
-                for name, slot in self.agents.items()
+                for name, slot in ((s.spec.name, s) for s in self._slots())
             },
         }
         os.makedirs(self.run_dir, exist_ok=True)
         tmp = os.path.join(self.run_dir, "run.json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, os.path.join(self.run_dir, "run.json"))
+        with self._run_file_lock:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, os.path.join(self.run_dir, "run.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +513,10 @@ class HubServer:
                         result = hub.send(request.get("from") or USER, request.get("to") or "", request.get("text") or "",
                                           wait=request.get("wait", True), timeout=request.get("timeout"))
                         self._reply({"ok": True, **result})
+                    elif op == "spawn":
+                        fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id")}
+                        info = hub.spawn(AgentSpec.from_dict(request.get("name") or "", fields))
+                        self._reply({"ok": True, "agent": info})
                     elif op == "list":
                         self._reply({"ok": True, "run": hub.run_id, "agents": hub.list_agents()})
                     elif op == "messages":
@@ -513,6 +595,12 @@ class HubClient:
 
     def list_agents(self) -> Dict[str, Any]:
         return self.request({"op": "list"})
+
+    def spawn(self, name: str, backend: str, model: Optional[str] = None, effort: Optional[str] = None,
+              cwd: Optional[str] = None, role: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Starts a new agent in the running hub (resuming `session_id` if given); returns once it is up or failed."""
+        return self.request({"op": "spawn", "name": name, "backend": backend, "model": model,
+                             "effort": effort, "cwd": cwd, "role": role, "session_id": session_id})
 
     def messages(self) -> Dict[str, Any]:
         return self.request({"op": "messages"})

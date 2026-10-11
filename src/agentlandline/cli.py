@@ -1,8 +1,9 @@
 """
 `landline`: start a multi-agent hub and talk to it from a terminal.
 
-    landline up run.json           start the agents in run.json and print live activity
+    landline up [run.json]         start a hub (with the agents in run.json) and print live activity
     landline send coder "..."      message an agent (as 'user') and print its reply
+    landline spawn claude reviewer --role "..."   start another agent in the running hub
     landline ls                    list agents in the running hub
     landline tail                  follow live activity of the running hub
     landline messages              print the run's message log
@@ -94,8 +95,8 @@ def _print_json(data: Any):
 
 def cmd_up(args) -> int:
     try:
-        config = load_config(args.config)
-        hub = Hub(config["agents"], run_id=args.run or config["run"])
+        config = load_config(args.config) if args.config else {"run": None, "agents": []}
+        hub = Hub(config["agents"], run_id=args.run or config["run"], socket_path=args.socket)
         server = HubServer(hub)
         server.start()
     except HubError as e:
@@ -104,7 +105,8 @@ def cmd_up(args) -> int:
 
     printer = EventPrinter()
     hub.subscribe(printer.handle)
-    print(f"Starting {', '.join(hub.agents)}…", flush=True)
+    if hub.agents:
+        print(f"Starting {', '.join(hub.agents)}…", flush=True)
     try:
         hub.start()
     except Exception as e:
@@ -112,7 +114,8 @@ def cmd_up(args) -> int:
         server.stop()
         return 1
 
-    print(f"Hub '{hub.run_id}' is up with {', '.join(hub.agents)}.")
+    agents = ", ".join(hub.agents) or "no agents yet (add some with `landline spawn`)"
+    print(f"Hub '{hub.run_id}' is up with {agents}.")
     print(f"  messages: {hub.log.path}")
     print(f"  socket:   {hub.socket_path}")
     print("  talk to it with `landline send <agent> <text>`; Ctrl-C to stop.\n", flush=True)
@@ -142,6 +145,18 @@ def cmd_send(args) -> int:
         print(res["reply"]["text"])
     else:
         print(f"{res['status']} ({res['message']['id']})" + (f": {res['error']}" if res.get("error") else ""))
+    return 0
+
+
+def cmd_spawn(args) -> int:
+    print(f"Starting {args.name}…", flush=True)
+    res = HubClient(args.socket).spawn(args.name, args.backend, model=args.model, effort=args.effort,
+                                       cwd=args.cwd, role=args.role, session_id=args.session)
+    if not res.get("ok"):
+        print(f"landline: {res.get('error')}", file=sys.stderr)
+        return 1
+    agent = res["agent"]
+    print(f"{agent['name']} is up ({agent['backend']}" + (f", {agent['model']}" if agent.get("model") else "") + ").")
     return 0
 
 
@@ -180,8 +195,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--socket", help="Hub socket path (default: $LANDLINE_SOCKET or ~/.agentlandline/hub.sock)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    up = sub.add_parser("up", help="Start the agents in a run config and print live activity")
-    up.add_argument("config", help="Run config JSON: {\"run\": ..., \"agents\": {name: {backend, model, cwd, role, ...}}}")
+    up = sub.add_parser("up", help="Start a hub (with the agents in a run config, if given) and print live activity")
+    up.add_argument("config", nargs="?", help="Run config JSON: {\"run\": ..., \"agents\": {name: {backend, model, cwd, role, ...}}}. "
+                                             "Without one the hub starts empty.")
     up.add_argument("--run", help="Run id (default: config 'run' or a timestamp)")
     up.set_defaults(func=cmd_up)
 
@@ -191,6 +207,16 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--from", dest="sender", default="user", help="Sender name (default: user)")
     send.add_argument("--no-wait", action="store_true", help="Return once queued instead of waiting for the reply")
     send.set_defaults(func=cmd_send)
+
+    spawn = sub.add_parser("spawn", help="Start another agent in the running hub")
+    spawn.add_argument("backend", help="claude or agy")
+    spawn.add_argument("name")
+    spawn.add_argument("--model")
+    spawn.add_argument("--effort")
+    spawn.add_argument("--cwd", help="Working folder (default: where the hub was started)")
+    spawn.add_argument("--role", help="What this agent is for; the others are told")
+    spawn.add_argument("--session", help="Resume this CLI session id instead of starting a new conversation")
+    spawn.set_defaults(func=cmd_spawn)
 
     sub.add_parser("ls", help="List agents in the running hub").set_defaults(func=cmd_ls)
     sub.add_parser("tail", help="Follow live activity of the running hub").set_defaults(func=cmd_tail)

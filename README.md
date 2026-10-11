@@ -147,12 +147,22 @@ landline up run.json
 
 ```bash
 landline send planner "Write a small script that prints the first 10 prime numbers, get it reviewed, and tell me the result"
+landline spawn claude reviewer --model sonnet --role "Reviews the coder's changes"   # add an agent
 landline ls          # agents, busy/idle, session ids
 landline tail        # follow live activity
 landline messages    # the run's message log
 ```
 
 Agents talk to each other with the `message_agent(to, text, wait=True)` and `list_agents()` MCP tools. These appear automatically in agents started by the hub, provided agent-landline is in that CLI's MCP config. A message that arrives while an agent is busy waits until its current turn ends, and an agent's final response to a message is delivered back to the sender.
+
+**Adding agents while it runs.** `landline up` with no config starts an empty hub.
+`landline spawn <claude|agy> <name> [--model --effort --cwd --role --session]` starts another agent in the
+running hub (`--session` resumes an existing CLI session). The agents already there are told who joined, and its role, with their
+next message.
+
+**Restarting a team.** The run's `run.json` lists every agent, including spawned ones, with their session
+ids, and is itself a valid config: `landline up ~/.agentlandline/runs/<run>/run.json` brings the whole team
+back with each agent resuming its conversation.
 
 **Message log.** Each run is stored in `~/.agentlandline/runs/<run>/` (override with `$LANDLINE_HOME`): `run.json` holds the agents and their session ids, and `messages.jsonl` has one line per message:
 

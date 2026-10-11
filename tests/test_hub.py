@@ -333,3 +333,161 @@ def test_agy_default_model_missing_settings(tmp_path):
     from agentlandline.agy_pipeline import AgyPipeline
     with patch.dict(os.environ, {"ANTIGRAVITY_APP_DATA_DIR": str(tmp_path)}):
         assert AgyPipeline.default_model() is None
+
+
+# --- spawning agents at runtime ----------------------------------------------
+
+def test_spawn_adds_a_working_agent(short_dir):
+    hub, pipelines = make_hub(short_dir, {}, a={"role": "lead"}, b={})
+    seen = []
+    hub.subscribe(seen.append)
+    try:
+        info = hub.spawn(AgentSpec("c", backend="claude", model="sonnet", role="reviews"))
+        assert info["name"] == "c" and info["model"] == "sonnet" and info["role"] == "reviews"
+        assert [a["name"] for a in hub.list_agents()] == ["a", "b", "c"]
+        added = [e for e in seen if e["kind"] == "agent_added"]
+        assert added and added[0]["agent"] == "c" and added[0]["info"]["role"] == "reviews"
+        assert hub.send("user", "c", "hi")["reply"]["text"] == "c got it"
+        data = json.load(open(os.path.join(short_dir, "runs", "test-run", "run.json")))
+        assert data["agents"]["c"]["role"] == "reviews"
+    finally:
+        hub.stop()
+
+
+def test_spawn_rejects_bad_requests_and_failed_starts(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    try:
+        with pytest.raises(HubError, match="already exists"):
+            hub.spawn(AgentSpec("a"))
+        with pytest.raises(HubError, match="Invalid agent name"):
+            AgentSpec.from_dict("bad name!", {"backend": "claude"})
+        with pytest.raises(HubError, match="Invalid agent name"):
+            AgentSpec.from_dict("user", {"backend": "claude"})
+        with pytest.raises(HubError, match="Unknown agent backend"):
+            AgentSpec.from_dict("x", {"backend": "gpt"})
+
+        class Broken(FakePipeline):
+            def start(self, timeout=None):
+                raise RuntimeError("claude process exited during startup")
+        hub._pipeline_factory = lambda spec, env: Broken(spec, env)
+        with pytest.raises(HubError, match="Couldn't start 'x'"):
+            hub.spawn(AgentSpec("x"))
+        assert "x" not in hub.agents
+    finally:
+        hub.stop()
+
+
+def test_existing_agents_are_told_once_about_new_ones(short_dir):
+    hub, pipelines = make_hub(short_dir, {}, a={"role": "lead"}, b={})
+    try:
+        hub.send("user", "a", "first")  # intro: knows b
+        hub.spawn(AgentSpec("c", role="reviews"))
+        hub.send("user", "a", "second")
+        hub.send("user", "a", "third")
+        hub.send("user", "c", "hello")
+        first, second, third = pipelines["a"].prompts
+        assert "- b" in first and "- c" not in first
+        assert second.startswith("New agents have joined the session:\n- c: reviews\n")
+        assert "joined" not in third
+        c_intro = hub.agents["c"].pipeline.prompts[0]
+        assert "You are agent 'c'" in c_intro and "- a: lead" in c_intro and "- b" in c_intro
+    finally:
+        hub.stop()
+
+
+def test_spawn_over_the_socket(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        client = HubClient(hub.socket_path)
+        res = client.spawn("tester", "agy", role="runs tests")
+        assert res["ok"] and res["agent"]["backend"] == "antigravity"
+        assert client.spawn("tester", "claude")["error"].startswith("An agent named 'tester' already exists")
+        assert "Invalid agent name" in client.spawn("no spaces", "claude")["error"]
+    finally:
+        server.stop()
+        hub.stop()
+
+
+def test_run_file_can_restart_the_whole_team(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={"role": "lead"}, b={})
+    try:
+        hub.spawn(AgentSpec("c", backend="claude", model="sonnet", role="reviews"))
+    finally:
+        hub.stop()
+    loaded = load_config(os.path.join(short_dir, "runs", "test-run", "run.json"))
+    assert loaded["run"] == "test-run"
+    by_name = {a.name: a for a in loaded["agents"]}
+    assert set(by_name) == {"a", "b", "c"}
+    assert by_name["c"].model == "sonnet" and by_name["c"].role == "reviews"
+    assert by_name["c"].session_id == "session-c"  # resumes the same CLI session
+
+
+def test_run_file_gets_session_id_even_before_pipeline_stores_it(short_dir):
+    # Real pipelines call listeners before setting conversation_id themselves.
+    hub, pipelines = make_hub(short_dir, {}, a={"backend": "claude"}, b={})
+    try:
+        pipelines["a"].conversation_id = None
+        for listener in pipelines["a"].listeners:
+            listener({"type": "system", "subtype": "init", "session_id": "late-session"})
+        data = json.load(open(os.path.join(short_dir, "runs", "test-run", "run.json")))
+        assert data["agents"]["a"]["session_id"] == "late-session"
+        assert {a["name"]: a["session_id"] for a in hub.list_agents()}["a"] == "late-session"
+    finally:
+        hub.stop()
+
+
+def test_spawn_over_the_socket_can_resume_a_session(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        assert HubClient(hub.socket_path).spawn("c", "claude", session_id="old-session")["ok"]
+        assert hub.agents["c"].spec.session_id == "old-session"
+    finally:
+        server.stop()
+        hub.stop()
+
+
+def test_empty_hub_starts_and_takes_spawns(short_dir):
+    hub = Hub([], run_id="empty", home=short_dir, socket_path=os.path.join(short_dir, "e.sock"),
+              pipeline_factory=lambda spec, env: FakePipeline(spec, env))
+    hub.start()
+    try:
+        assert hub.list_agents() == []
+        hub.spawn(AgentSpec("solo"))
+        assert hub.send("user", "solo", "hi")["reply"]["text"] == "solo got it"
+    finally:
+        hub.stop()
+
+
+def test_spawns_start_in_parallel_and_names_stay_unique(short_dir):
+    import time
+
+    class SlowStart(FakePipeline):
+        def start(self, timeout=None):
+            time.sleep(0.4)
+
+    hub = Hub([], run_id="par", home=short_dir, socket_path=os.path.join(short_dir, "p.sock"),
+              pipeline_factory=lambda spec, env: SlowStart(spec, env))
+    hub.start()
+    results, errors = [], []
+
+    def spawn(name):
+        try:
+            results.append(hub.spawn(AgentSpec(name))["name"])
+        except HubError as e:
+            errors.append(str(e))
+    try:
+        t0 = time.monotonic()
+        threads = [threading.Thread(target=spawn, args=(n,)) for n in ("a", "b", "c", "a")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert time.monotonic() - t0 < 1.0  # four 0.4s starts overlapped
+        assert sorted(results) == ["a", "b", "c"]
+        assert errors == ["An agent named 'a' already exists."]
+    finally:
+        hub.stop()

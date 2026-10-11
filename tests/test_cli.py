@@ -77,3 +77,37 @@ def test_send_ls_and_messages_commands(short_dir, capsys):  # noqa: F811
 def test_commands_without_hub_fail_cleanly(short_dir, capsys):  # noqa: F811
     assert main(["--socket", os.path.join(short_dir, "none.sock"), "ls"]) == 1
     assert "landline up" in capsys.readouterr().err
+
+
+def test_spawn_command(short_dir, capsys):  # noqa: F811
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        sock = ["--socket", hub.socket_path]
+        assert main(sock + ["spawn", "claude", "reviewer", "--model", "sonnet", "--role", "reviews code"]) == 0
+        assert "reviewer is up (claude, sonnet)." in capsys.readouterr().out
+        assert "reviewer" in hub.agents and hub.agents["reviewer"].spec.role == "reviews code"
+        assert main(sock + ["spawn", "claude", "reviewer"]) == 1
+        assert "already exists" in capsys.readouterr().err
+    finally:
+        server.stop()
+        hub.stop()
+
+
+def test_landline_up_without_config_starts_an_empty_hub(short_dir):  # noqa: F811
+    import subprocess
+    import time
+    sock = os.path.join(short_dir, "up.sock")
+    env = {**os.environ, "LANDLINE_HOME": short_dir, "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..", "src")}
+    proc = subprocess.Popen([sys.executable, "-m", "agentlandline", "--socket", sock, "up"], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        deadline = time.monotonic() + 15
+        while not os.path.exists(sock) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert main(["--socket", sock, "ls"]) == 0
+    finally:
+        proc.send_signal(2)
+        out = proc.communicate(timeout=15)[0]
+    assert "is up with no agents yet" in out and proc.returncode == 0
