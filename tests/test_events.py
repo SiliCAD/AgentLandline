@@ -121,3 +121,8 @@ def test_agy_step_thinking_reads_transcript(tmp_path):
     assert agy_step_thinking(str(transcript), 3) is None
     assert agy_step_thinking(None, 1) is None
     assert agy_step_thinking(str(tmp_path / "missing.jsonl"), 1) is None
+
+
+def test_claude_init_reports_model():
+    raw = {"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-sonnet-5-5"}
+    assert normalize("claude", raw) == [{"kind": "session", "session_id": "s1", "model": "claude-sonnet-5-5"}]

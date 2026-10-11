@@ -116,6 +116,7 @@ class _AgentSlot:
         self.current_trigger: Optional[str] = None  # message id that started the running turn
         self.busy = False
         self.introduced = False
+        self.reported_model: Optional[str] = None  # what the CLI says it is running
         self.thread: Optional[threading.Thread] = None
 
 
@@ -224,6 +225,8 @@ class Hub:
         slot = self.agents[name]
         for event in normalize(slot.spec.backend, raw):
             if event["kind"] == "session":
+                slot.reported_model = event.get("model") or slot.reported_model
+                event = {**event, "model": self.model_in_use(slot)}
                 self._write_run_file()
             self._emit({**event, "agent": name})
         if slot.spec.backend == "antigravity":
@@ -350,11 +353,26 @@ class Hub:
 
     # ------------------------------------------------------------ inspection
 
+    @staticmethod
+    def model_in_use(slot: _AgentSlot) -> Optional[str]:
+        """
+        The model an agent actually runs: what its CLI reported (claude), else the
+        configured one, else agy's default from its settings. None if unknown.
+        """
+        if slot.reported_model:
+            return slot.reported_model
+        if slot.spec.model:
+            return slot.spec.model
+        if slot.spec.backend == "antigravity":
+            return AgyPipeline.default_model()
+        return None
+
     def list_agents(self) -> List[Dict[str, Any]]:
         return [{
             "name": name,
             "backend": slot.spec.backend,
-            "model": slot.spec.model,
+            "model": self.model_in_use(slot),
+            "effort": slot.spec.effort,
             "role": slot.spec.role,
             "session_id": slot.pipeline.conversation_id,
             "transcript": slot.pipeline.transcript_path(),
@@ -371,6 +389,7 @@ class Hub:
             "agents": {
                 name: {**{k: v for k, v in asdict(slot.spec).items() if k != "name"},
                        "session_id": slot.pipeline.conversation_id or slot.spec.session_id,
+                       "model_in_use": self.model_in_use(slot),
                        "transcript": slot.pipeline.transcript_path()}
                 for name, slot in self.agents.items()
             },

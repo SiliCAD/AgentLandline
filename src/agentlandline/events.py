@@ -6,7 +6,7 @@ listeners, but the two CLIs speak different protocols. `normalize()` maps one ra
 event from either backend to zero or more small dicts with a shared shape, so a
 consumer can render any agent's activity without knowing which CLI it runs:
 
-    {"kind": "session",    "session_id": str}
+    {"kind": "session",    "session_id": str, "model": str}   # model: claude only
     {"kind": "text_delta", "text": str}                    # streamed text chunk
     {"kind": "text",       "text": str}                    # complete text block (claude)
     {"kind": "thinking",   "text": str}                    # may be "" when the CLI redacts it
@@ -42,7 +42,10 @@ def _normalize_claude(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     kind = raw.get("type")
 
     if kind == "system" and raw.get("subtype") == "init":
-        return [{"kind": "session", "session_id": raw.get("session_id")}]
+        event = {"kind": "session", "session_id": raw.get("session_id")}
+        if raw.get("model"):
+            event["model"] = raw["model"]
+        return [event]
 
     if kind == "stream_event":
         event = raw.get("event") or {}

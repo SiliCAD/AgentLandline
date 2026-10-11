@@ -268,6 +268,20 @@ class AgyPipeline:
         """Path of this conversation's on-disk transcript, or None if it doesn't exist (yet)."""
         return self.transcript_path_for(self.conversation_id)
 
+    @staticmethod
+    def default_model() -> Optional[str]:
+        """
+        The model agy uses when none is passed, from its settings.json (e.g.
+        "Gemini 3.8 Flash (High)"). agy doesn't report its model on the stream.
+        """
+        app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or os.path.expanduser("~/.gemini/antigravity-cli")
+        try:
+            with open(os.path.join(app_data, "settings.json"), "r", encoding="utf-8") as f:
+                model = json.load(f).get("model")
+        except (OSError, ValueError, AttributeError):
+            return None
+        return model if isinstance(model, str) and model.strip() else None
+
     def _extract_recent_questions(self) -> List[Dict[str, Any]]:
         """Extracts any ask_question tool calls from the recent turn in the conversation transcript."""
         transcript_path = self.transcript_path()

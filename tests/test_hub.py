@@ -303,3 +303,33 @@ def test_load_config_errors_are_readable(tmp_path):
     bad.write_text("[]")
     with pytest.raises(HubError, match="expected a JSON object"):
         load_config(str(bad))
+
+
+def test_model_in_use_prefers_reported_then_configured_then_agy_default(short_dir, tmp_path):
+    settings = tmp_path / "agy"
+    settings.mkdir()
+    (settings / "settings.json").write_text(json.dumps({"model": "Gemini 3.8 Flash (High)"}))
+    from unittest.mock import patch
+    with patch.dict(os.environ, {"ANTIGRAVITY_APP_DATA_DIR": str(settings)}):
+        hub, pipelines = make_hub(short_dir, {}, a={"backend": "claude"}, b={"backend": "claude", "model": "opus"},
+                                  c={"backend": "antigravity"})
+        seen = []
+        hub.subscribe(seen.append)
+        try:
+            models = {a["name"]: a["model"] for a in hub.list_agents()}
+            assert models == {"a": None, "b": "opus", "c": "Gemini 3.8 Flash (High)"}
+            for listener in pipelines["a"].listeners:
+                listener({"type": "system", "subtype": "init", "session_id": "s", "model": "claude-sonnet-5-5"})
+            assert {a["name"]: a["model"] for a in hub.list_agents()}["a"] == "claude-sonnet-5-5"
+            assert seen[-1] == {**seen[-1], "kind": "session", "agent": "a", "model": "claude-sonnet-5-5"}
+            data = json.load(open(os.path.join(short_dir, "runs", "test-run", "run.json")))
+            assert data["agents"]["a"]["model_in_use"] == "claude-sonnet-5-5"
+        finally:
+            hub.stop()
+
+
+def test_agy_default_model_missing_settings(tmp_path):
+    from unittest.mock import patch
+    from agentlandline.agy_pipeline import AgyPipeline
+    with patch.dict(os.environ, {"ANTIGRAVITY_APP_DATA_DIR": str(tmp_path)}):
+        assert AgyPipeline.default_model() is None
