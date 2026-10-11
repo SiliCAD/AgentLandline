@@ -36,7 +36,6 @@ AgentLandline/
 │       ├── cli.py                # `landline` command (up / send / ls / tail / messages)
 │       └── issue_reporter.py     # GitHub Issue Reporter & gh CLI wrapper
 ├── tests/                        # pytest suites (unit tests are offline; *_pipeline.py are live)
-├── examples/run.json             # Sample multi-agent run config
 └── pyproject.toml                # Package metadata (pip install -e .)
 ```
 
@@ -117,7 +116,7 @@ Add **AgentLandline** to your MCP client configuration file (e.g., `~/.gemini/an
 
 Run several named agents at once and let them work together, with you able to watch and step in.
 
-**1. Describe the agents** in a JSON run config (see [`examples/run.json`](examples/run.json)):
+**1. Describe the agents** in a JSON run config, e.g. `run.json`:
 
 ```json
 {
@@ -141,7 +140,7 @@ At the top level, `run` names the run (default: a timestamp).
 **2. Start the hub.** It starts every agent and prints live activity: messages between agents, tool calls, text, and thinking where the CLI exposes it.
 
 ```bash
-landline up examples/run.json
+landline up run.json
 ```
 
 **3. Talk to it** from another terminal:
