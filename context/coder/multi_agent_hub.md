@@ -1,0 +1,134 @@
+# Multi-Agent Hub (`hub.py`, `message_log.py`, `events.py`, `cli.py`)
+
+The hub runs several named agent sessions side by side (any mix of `agy` and `claude`), routes
+messages between them, records who sent which message to whom, and exposes live activity. It is
+started with `landline up <config.json>`. The single-session MCP tools (`initialize_agent`,
+`send_prompt`, ...) are unaffected and work without a hub.
+
+The design is deliberately minimal: plain JSON files, no database, no copied conversation history.
+Add complexity only when a real run shows the need for it.
+
+---
+
+## 1. Components
+
+```
+landline up run.json
+   └── Hub (hub.py)
+        ├── one AgyPipeline / ClaudePipeline per agent (+ inbox queue + worker thread)
+        ├── MessageLog  -> ~/.agentlandline/runs/<run>/messages.jsonl
+        ├── run.json    -> ~/.agentlandline/runs/<run>/run.json (agents, session ids)
+        ├── live events -> subscribers (events.normalize + message/turn records)
+        └── HubServer   -> Unix socket ~/.agentlandline/hub.sock
+              ├── landline send / ls / tail / messages   (cli.py, HubClient)
+              └── agent-landline MCP server inside each agent (hub mode: message_agent, list_agents)
+```
+
+`$LANDLINE_HOME` overrides `~/.agentlandline`; `$LANDLINE_SOCKET` overrides the socket path.
+
+---
+
+## 2. Message flow
+
+- `Hub.send(sender, to, text, wait=True)`: `sender` is an agent name or `'user'`.
+  1. The message is written to the log and emitted as a `message` event.
+  2. It goes into `to`'s inbox. The agent's worker delivers inbox messages one at a time, so a message
+     that arrives mid-turn waits until the current turn ends.
+  3. The worker sends the framed prompt (`[landline message <id> from <sender>]\n<text>`) with no timeout.
+     The first message to each agent is prefixed with an intro: its name and role, the other agents,
+     and how replying and `message_agent` work.
+  4. The agent's final response is logged as a message back to the sender (`caused_by` = the message
+     it answers). With `wait=True`, the caller gets this reply back.
+- Sending to `'user'` only records the message, since there is no inbox to deliver it to.
+- **Wait-cycle guard**: the hub tracks which agent is waiting on which. If A is waiting on B and B
+  tries to wait on A (directly or through a longer chain), B gets a `HubError` explaining the
+  deadlock instead of hanging. `wait=False` sends are always allowed.
+- Claude agents get `MCP_TOOL_TIMEOUT` raised to 24h, because an agent waiting on another agent's
+  reply is itself in the middle of a `message_agent` tool call.
+
+---
+
+## 3. Message log schema (`messages.jsonl`)
+
+One JSON object per line, appended (crash-safe, readable with `cat`):
+
+| Field | Meaning |
+| :--- | :--- |
+| `id` | `m1`, `m2`, ... per run (numbering continues if a run directory is reused) |
+| `ts` | UTC timestamp |
+| `from`, `to` | Agent names or `user` |
+| `text` | The message as sent (before framing) |
+| `caused_by` | The message that started the sender's current turn, so records chain back to the original request |
+| `from_session` | Sender's CLI session/conversation id |
+| `from_transcript` | Path to the sender's own CLI transcript |
+| `from_transcript_line` | That transcript's line count when the message was sent: where to start reading for the reasoning behind it |
+
+Transcript locations: claude `~/.claude/projects/<cwd-dir>/<session>.jsonl` (`ClaudePipeline.transcript_path()`),
+agy `.../brain/<id>/.system_generated/logs/transcript.jsonl` (`AgyPipeline.transcript_path()`).
+Claude Code deletes transcripts after `cleanupPeriodDays` (30 by default), so links in old runs can go stale.
+Copy the transcripts of runs worth keeping.
+
+---
+
+## 4. Live events (`events.py`)
+
+`normalize(backend, raw)` maps one raw stream-json event to zero or more of:
+
+| `kind` | Fields |
+| :--- | :--- |
+| `session` | `session_id` |
+| `text_delta` | `text` (streamed chunk; claude needs `--include-partial-messages`, which the hub enables) |
+| `text` | `text` (complete block; claude only) |
+| `thinking` | `text` (may be empty) |
+| `tool_start` | `id`, `name`, `input` |
+| `tool_end` | `id`, `ok`, `output` (clipped to 2000 chars) |
+| `turn_end` | `ok`, `duration_s`, `usage` |
+
+The hub adds `agent` and `ts` to each one, and also emits `message` (a full log record), `turn_start`
+(`message_id`) and `idle`. Live events are not persisted.
+
+**Reasoning visibility (verified against claude 2.1.x and agy 1.3.x):**
+- agy streams only a thinking token count, but writes each model step's `thinking` text to its
+  transcript. When an `agent_response` step completes, the hub reads that text back
+  (`agy_step_thinking`, retried briefly in case the line lands late) and emits a `thinking` event.
+- Claude Code emits `thinking` blocks, but with empty text in both the stream and its saved transcript.
+  For claude agents, the visible reasoning is the text between tool calls.
+
+---
+
+## 5. Socket API (`HubServer` / `HubClient`)
+
+One JSON request line per connection, answered with one JSON line (`subscribe` keeps streaming):
+
+```json
+{"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true, "timeout": null}
+{"op": "list"}
+{"op": "messages"}
+{"op": "subscribe"}
+```
+
+Replies carry `"ok": true|false` (`"error"` when false). `subscribe` first returns a snapshot
+(`run`, `agents`), then one event per line until the client disconnects. Starting a second hub on a
+socket that is in use fails. A stale socket file left by a crashed hub is removed on start.
+
+---
+
+## 6. Agent requirements
+
+- An agent can only *initiate* messages if agent-landline is in its CLI's MCP config (claude:
+  `~/.claude.json` or project config; agy: `agy mcp add`). The hub passes `LANDLINE_AGENT`,
+  `LANDLINE_SOCKET` and `LANDLINE_RUN` in the agent's environment, and the MCP server it launches
+  inherits them and switches to hub mode.
+- Agents without the MCP server can still receive messages and reply (their final response is
+  delivered back automatically).
+
+---
+
+## 7. Testing
+
+- `tests/test_hub.py`: routing, `caused_by` chains, the wait-cycle guard, parallel start, run.json,
+  and the socket API, using fake pipelines (no CLI processes).
+- `tests/test_message_log.py`, `tests/test_events.py` (shapes taken from real captures),
+  `tests/test_cli.py`, `tests/test_server_hub_mode.py`.
+- Live check: `landline up` with a claude agent and an agy agent, then `landline send <agent> ...`
+  asking one to consult the other through `message_agent`.

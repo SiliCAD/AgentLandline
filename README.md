@@ -12,6 +12,7 @@ It allows external AI agents (such as Antigravity IDE, Claude Code, Cursor, or c
 - **🧩 Multi-Backend Pipelines**: Drives either the Antigravity (`agy`) or Claude Code (`claude`) CLI through the same manager interface, selected per-session via `backend=`.
 - **🔄 Multi-Turn Session Orchestration**: Seamlessly resumes and maintains agent conversation sessions using background streaming JSON subprocess communication.
 - **📊 Real-time Status & Transcript Monitoring**: Inspect live process health, streaming output buffers, and per-backend on-disk transcripts.
+- **👥 Multi-Agent Sessions (`landline`)**: Run several named agents side by side (any mix of `agy` and `claude`), let them message each other through a hub, step in with your own messages, and follow everything live from a terminal. Every message is recorded with who sent it to whom and a link to the sender's own CLI transcript.
 - **🐛 Automated GitHub Issue Reporting**: Instantly report bugs, tracebacks, or feature requests directly to GitHub via the `gh` CLI with automatic client-agent detection, smart label normalization (`new_lable` <-> `new lable`, typo matching), and auto-creation of missing labels with random colors.
 - **🛠 Robust Process Recovery**: Automatic re-initialization and stream re-connection upon process interrupts or stdin pipe errors.
 
@@ -22,29 +23,34 @@ It allows external AI agents (such as Antigravity IDE, Claude Code, Cursor, or c
 ```
 AgentLandline/
 ├── src/
-│   ├── server.py           # MCP Server Entrypoint (FastMCP tool definitions)
-│   ├── agent_manager.py    # High-level Orchestration Manager & Transcript Reader (backend-aware)
-│   ├── pipeline_factory.py # Backend name/alias -> pipeline class resolution
-│   ├── agy_pipeline.py     # Antigravity backend: launches `agy` (stream-json) — unchanged
-│   ├── claude_pipeline.py  # Claude Code backend: launches `claude` (stream-json) — independent, self-contained
-│   └── issue_reporter.py   # GitHub Issue Reporter & gh CLI wrapper
-├── tests/
-│   ├── test_agent_manager.py     # Unit tests for transcript parser & DB forking
-│   ├── test_pipeline_backends.py # Unit tests for backend selection & stream-json parsing
-│   ├── test_agy_pipeline.py      # Integration test for multi-turn agy sessions
-│   ├── test_claude_pipeline.py   # Integration test for multi-turn claude sessions
-│   └── test_issue_reporter.py    # Unit tests for smart label matching and auto-creation
-└── requirements.txt        # Dependencies
+│   ├── server.py                 # Compatibility shim for MCP configs that launch src/server.py
+│   └── agentlandline/            # The installable package
+│       ├── server.py             # MCP Server Entrypoint (FastMCP tool definitions, hub-mode tools)
+│       ├── agent_manager.py      # High-level Orchestration Manager & Transcript Reader (backend-aware)
+│       ├── pipeline_factory.py   # Backend name/alias -> pipeline class resolution
+│       ├── agy_pipeline.py       # Antigravity backend: launches `agy` (stream-json)
+│       ├── claude_pipeline.py    # Claude Code backend: launches `claude` (stream-json)
+│       ├── hub.py                # Multi-agent hub: agents, inboxes, routing, local socket API
+│       ├── message_log.py        # messages.jsonl: who sent which message to whom
+│       ├── events.py             # Normalizes both CLIs' live events to one shape
+│       ├── cli.py                # `landline` command (up / send / ls / tail / messages)
+│       └── issue_reporter.py     # GitHub Issue Reporter & gh CLI wrapper
+├── tests/                        # pytest suites (unit tests are offline; *_pipeline.py are live)
+├── examples/run.json             # Sample multi-agent run config
+└── pyproject.toml                # Package metadata (pip install -e .)
 ```
 
 ### Core Components
 
-1. **`src/server.py`**: The FastMCP server hosting tools for client agents. Automatically extracts client agent metadata (`clientInfo`) on initialization.
-2. **`src/agent_manager.py`**: High-level manager (`AgentManager`) that maintains the active pipeline instance (whichever backend), and provides backend-aware transcript search. Named generically (not `agy_manager`) because it orchestrates any registered backend, not just Antigravity.
-3. **`src/agy_pipeline.py`**: Non-blocking subprocess bridge (`AgyPipeline`) for the Antigravity backend — untouched by the Claude Code addition.
-4. **`src/claude_pipeline.py`**: Non-blocking subprocess bridge (`ClaudePipeline`) for the Claude Code backend — a separate, self-contained module (no shared base class with `agy_pipeline.py`) implementing Claude Code's own stream-json protocol (Anthropic-Messages-API-shaped events, vs. agy's `event`-keyed protocol).
-5. **`src/pipeline_factory.py`**: Resolves a backend name/alias (`'agy'`, `'antigravity'`, `'claude'`, `'claude-code'`, ...) to its pipeline class.
-6. **`src/issue_reporter.py`**: Utility (`IssueReporter`) formatting GitHub issues with session metadata, smart label normalization/matching (typography tolerance), and auto-creating missing labels with random colors.
+Modules below live in `src/agentlandline/`.
+
+1. **`server.py`**: The FastMCP server hosting tools for client agents. Automatically extracts client agent metadata (`clientInfo`) on initialization.
+2. **`agent_manager.py`**: High-level manager (`AgentManager`) that maintains the active pipeline instance (whichever backend), and provides backend-aware transcript search. Named generically (not `agy_manager`) because it orchestrates any registered backend, not just Antigravity.
+3. **`agy_pipeline.py`**: Non-blocking subprocess bridge (`AgyPipeline`) for the Antigravity backend — untouched by the Claude Code addition.
+4. **`claude_pipeline.py`**: Non-blocking subprocess bridge (`ClaudePipeline`) for the Claude Code backend — a separate, self-contained module (no shared base class with `agy_pipeline.py`) implementing Claude Code's own stream-json protocol (Anthropic-Messages-API-shaped events, vs. agy's `event`-keyed protocol).
+5. **`pipeline_factory.py`**: Resolves a backend name/alias (`'agy'`, `'antigravity'`, `'claude'`, `'claude-code'`, ...) to its pipeline class.
+6. **`issue_reporter.py`**: Utility (`IssueReporter`) formatting GitHub issues with session metadata, smart label normalization/matching (typography tolerance), and auto-creating missing labels with random colors.
+7. **`hub.py`, `message_log.py`, `events.py`, `cli.py`**: Multi-agent sessions; see [Multi-Agent Sessions](#-multi-agent-sessions-landline) below and [`context/coder/multi_agent_hub.md`](context/coder/multi_agent_hub.md).
 
 See [`context/coder/pipeline_backends.md`](context/coder/pipeline_backends.md) for a deep-dive on the two protocols and how forking/transcripts differ per backend.
 
@@ -63,10 +69,12 @@ See [`context/coder/pipeline_backends.md`](context/coder/pipeline_backends.md) f
 Clone the repository and install dependencies:
 
 ```bash
-git clone https://github.com/your-org/AgentLandline.git
+git clone https://github.com/SiliCAD/AgentLandline.git
 cd AgentLandline
-pip install -r requirements.txt
+pip install -e .
 ```
+
+This installs the `agentlandline` package plus two commands: `agentlandline-mcp` (the MCP server) and `landline` (multi-agent sessions). Without installing, use `PYTHONPATH=src python3 -m agentlandline ...` in place of `landline`.
 
 ---
 
@@ -87,6 +95,8 @@ Add **AgentLandline** to your MCP client configuration file (e.g., `~/.gemini/an
 }
 ```
 
+`src/server.py` keeps working as an entrypoint. After `pip install -e .` you can use `"command": "agentlandline-mcp"` with no args instead.
+
 ---
 
 ## 🧰 MCP Tools Reference
@@ -98,6 +108,57 @@ Add **AgentLandline** to your MCP client configuration file (e.g., `~/.gemini/an
 | `agent_status` | `mode` *(str, default: 'process')* | Queries status. Modes: `process` (PID, health & active backend), `output` (live output buffer), `transcript` (last turn transcript). |
 | `exit_agent` | *None* | Gracefully terminates and cleans up the current agent process. |
 | `report_issue` | `title` *(str)*<br>`body` *(str)*<br>`label` *(str)*<br>`repo` *(str, default: 'SiliCAD/AgentLandline')*<br>`agent_model` *(str)*<br>`session_id` *(str)* | Creates a GitHub issue in the target repository (default: `SiliCAD/AgentLandline`) with formatted metadata, smart typography/typo label matching (`new_lable` <-> `new lable`), and auto-creation of missing labels with random colors. |
+| `message_agent` *(hub mode)* | `to` *(str)*<br>`text` *(str)*<br>`wait` *(bool, default: true)* | Only in agents started by `landline up`. Sends a message to another agent (or `'user'`) through the hub and, with `wait`, returns its reply. |
+| `list_agents` *(hub mode)* | *None* | Only in agents started by `landline up`. Lists the other agents with their roles and busy state. |
+
+---
+
+## 👥 Multi-Agent Sessions (`landline`)
+
+Run several named agents at once and let them work together, with you able to watch and step in.
+
+**1. Describe the agents** in a JSON run config (see [`examples/run.json`](examples/run.json)):
+
+```json
+{
+  "run": "opamp-2stage",
+  "agents": {
+    "architect": {"backend": "claude", "model": "opus",   "cwd": "~/designs/opamp", "role": "Lead designer"},
+    "coder":     {"backend": "claude", "model": "sonnet", "cwd": "~/designs/opamp", "role": "Sizes devices, edits schematics"},
+    "tester":    {"backend": "agy",                       "cwd": "~/designs/opamp", "role": "Runs PVT, DRC and LVS"}
+  }
+}
+```
+
+Per agent: `backend` (`claude`/`agy`), and optionally `model`, `effort`, `cwd`, `role`, and `session_id` to resume an existing CLI session.
+
+**2. Start the hub.** It starts every agent and prints live activity: messages between agents, tool calls, text, and thinking where the CLI exposes it.
+
+```bash
+landline up examples/run.json
+```
+
+**3. Talk to it** from another terminal:
+
+```bash
+landline send architect "Design a 2-stage Miller opamp, GBW >= 50 MHz, PM >= 60 deg"
+landline ls          # agents, busy/idle, session ids
+landline tail        # follow live activity
+landline messages    # the run's message log
+```
+
+Agents talk to each other with the `message_agent(to, text, wait=True)` and `list_agents()` MCP tools. These appear automatically in agents started by the hub, provided agent-landline is in that CLI's MCP config. A message that arrives while an agent is busy waits until its current turn ends, and an agent's final response to a message is delivered back to the sender.
+
+**Message log.** Each run is stored in `~/.agentlandline/runs/<run>/` (override with `$LANDLINE_HOME`): `run.json` holds the agents and their session ids, and `messages.jsonl` has one line per message:
+
+```json
+{"id": "m3", "ts": "2026-10-11T09:49:30Z", "from": "tester", "to": "architect", "text": "...",
+ "caused_by": "m2", "from_session": "<session id>", "from_transcript": "<path>", "from_transcript_line": 34}
+```
+
+Conversation history isn't copied. Each record links to the sender's own CLI transcript and the line it had reached when the message was sent, and `caused_by` chains each message back to the original request. Claude Code deletes transcripts after 30 days by default (`cleanupPeriodDays`), so copy the transcripts of runs you want to keep.
+
+**What reasoning is visible.** agy streams text and tool calls live, and writes each step's thinking to its transcript, which the hub reads back and shows. Claude Code streams text and tool calls, but in current versions saves its thinking blocks with empty text, so for claude agents the visible reasoning is their text between tool calls.
 
 ---
 
@@ -108,7 +169,7 @@ You can also use `AgentManager`, or a backend pipeline directly, in Python scrip
 ### Using `AgentManager` with either backend
 
 ```python
-from agent_manager import AgentManager
+from agentlandline.agent_manager import AgentManager
 
 manager = AgentManager()
 
@@ -127,8 +188,8 @@ manager.exit()
 ### Using a pipeline directly (`AgyPipeline` / `ClaudePipeline`)
 
 ```python
-from agy_pipeline import AgyPipeline
-# from claude_pipeline import ClaudePipeline  # swap in for the Claude Code backend
+from agentlandline.agy_pipeline import AgyPipeline
+# from agentlandline.claude_pipeline import ClaudePipeline  # swap in for the Claude Code backend
 
 # Start headless pipeline session
 pipeline = AgyPipeline(skip_permissions=True, model="gemini-3.6-flash")
@@ -154,7 +215,7 @@ pipeline.close()
 Run an interactive test session in terminal:
 
 ```bash
-python src/agy_pipeline.py --model gemini-3.6-flash
+python src/agentlandline/agy_pipeline.py --model gemini-3.6-flash
 ```
 
 ---
@@ -169,6 +230,9 @@ pytest tests/test_agent_manager.py -v
 
 # Unit tests: backend selection & stream-json event parsing (offline, no subprocess)
 pytest tests/test_pipeline_backends.py -v
+
+# All offline unit tests (hub, message log, events, CLI, MCP tools, ...)
+pytest tests --ignore=tests/test_agy_pipeline.py --ignore=tests/test_claude_pipeline.py
 
 # Integration test: multi-turn agy session (requires `agy` in PATH)
 python tests/test_agy_pipeline.py

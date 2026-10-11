@@ -6,7 +6,7 @@ This document details the FastMCP server architecture, tool contracts, parameter
 
 ## 1. FastMCP Architecture Overview
 
-`src/server.py` hosts the MCP server entrypoint using [FastMCP](https://github.com/jlowin/fastmcp). The server communicates over standard input/output (stdio JSON-RPC) with MCP host applications (Antigravity IDE, `agy` CLI, Claude Desktop, Cursor, or custom runners).
+`src/agentlandline/server.py` hosts the MCP server entrypoint using [FastMCP](https://github.com/jlowin/fastmcp). The server communicates over standard input/output (stdio JSON-RPC) with MCP host applications (Antigravity IDE, `agy` CLI, Claude Desktop, Cursor, or custom runners).
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -17,7 +17,7 @@ This document details the FastMCP server architecture, tool contracts, parameter
                             ▼
 ┌────────────────────────────────────────────────────────┐
 │             AgentLandline (FastMCP Server)             │
-│                     src/server.py                      │
+│              src/agentlandline/server.py               │
 │                                                        │
 │  - initialize_agent  -> Launches/resumes agy session   │
 │  - send_prompt       -> Bidirectional turn dispatch    │
@@ -29,14 +29,14 @@ This document details the FastMCP server architecture, tool contracts, parameter
               ▼                            ▼
 ┌───────────────────────────┐ ┌──────────────────────────┐
 │       AgentManager        │ │      IssueReporter       │
-│    src/agent_manager.py   │ │   src/issue_reporter.py  │
+│     agent_manager.py      │ │    issue_reporter.py     │
 │  (Session & DB Forking)   │ │  (Smart Label Matching)  │
 └─────────────┬─────────────┘ └──────────────────────────┘
               │
               ▼
 ┌───────────────────────────┐
 │        AgyPipeline        │
-│     src/agy_pipeline.py   │
+│      agy_pipeline.py      │
 │ (Subprocess stream-json)  │
 └───────────────────────────┘
 ```
@@ -167,7 +167,7 @@ def report_issue(
 
 ## 3. Client Agent Detection
 
-`src/server.py` implements `get_client_agent_name(ctx: Context)`:
+`src/agentlandline/server.py` implements `get_client_agent_name(ctx: Context)`:
 ```python
 def get_client_agent_name(ctx: Context = None) -> str:
     """Extracts client agent name from MCP initialization clientInfo metadata."""

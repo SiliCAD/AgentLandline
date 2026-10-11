@@ -1,7 +1,7 @@
 # Multi-Backend Pipeline Architecture & Stream-JSON Protocols
 
-This document details `src/agy_pipeline.py`, `src/claude_pipeline.py`, and
-`src/pipeline_factory.py` — the layer that lets `AgentManager` drive either the **Antigravity CLI
+This document details `src/agentlandline/agy_pipeline.py`, `src/agentlandline/claude_pipeline.py`, and
+`src/agentlandline/pipeline_factory.py` — the layer that lets `AgentManager` drive either the **Antigravity CLI
 (`agy`)** or the **Claude Code CLI (`claude`)**, and the two backends' differing stream-json
 protocols.
 
@@ -9,8 +9,8 @@ protocols.
 
 ## 1. Independent, self-contained pipeline modules — no shared base class
 
-`AgyPipeline` (`src/agy_pipeline.py`, pre-existing and unchanged) and `ClaudePipeline`
-(`src/claude_pipeline.py`, new) are deliberately **not** built on a shared base class. Both CLIs
+`AgyPipeline` (`src/agentlandline/agy_pipeline.py`, pre-existing and unchanged) and `ClaudePipeline`
+(`src/agentlandline/claude_pipeline.py`, new) are deliberately **not** built on a shared base class. Both CLIs
 happen to be launched the same way in principle — a long-running subprocess with
 `--input-format stream-json --output-format stream-json`, one JSON object per line on stdin to
 drive a turn, a stream of JSON objects on stdout — but the two protocols differ enough in event
@@ -32,7 +32,7 @@ at the call site and avoids coupling the two backends through a shared type.
 
 ---
 
-## 2. Backend resolution (`src/pipeline_factory.py`)
+## 2. Backend resolution (`src/agentlandline/pipeline_factory.py`)
 
 ```python
 from pipeline_factory import create_pipeline, normalize_backend
@@ -136,7 +136,7 @@ recovery, `extract_last_command`), never on the critical path of a turn.
 
 ## 5. Manager-level differences
 
-`AgentManager` (`src/agent_manager.py`) is otherwise backend-agnostic — `send_prompt`, `status`, and
+`AgentManager` (`src/agentlandline/agent_manager.py`) is otherwise backend-agnostic — `send_prompt`, `status`, and
 `exit` operate on whichever pipeline instance (`AgyPipeline` or `ClaudePipeline`) is active via
 `self.pipeline`/`self.backend`, accessed only by shared attribute names. `initialize()`
 constructs the right class explicitly (`AgyPipeline(...)` or `ClaudePipeline(...)`) since their

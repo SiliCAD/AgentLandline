@@ -75,7 +75,7 @@ Every code change must be validated against the repository's test suites before 
 3. **Verify MCP Tool Signatures**:
    Ensure `server.py` runs and registers tools without import errors or schema validation exceptions:
    ```bash
-   PYTHONPATH=src python3 -c "import server; print('Server loaded successfully')"
+   PYTHONPATH=src python3 -c "from agentlandline import server; print('Server loaded successfully')"
    ```
 
 ---

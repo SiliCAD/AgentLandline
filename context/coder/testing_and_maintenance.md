@@ -10,9 +10,16 @@ AgentLandline uses **`pytest`** as its primary test runner. The test suite is di
 
 ```
 tests/
-├── test_issue_reporter.py  # Unit: Label normalization, fuzzy matching, and mock gh calls
-├── test_agent_manager.py   # Unit: SQLite conversation cloning, transcript parsing
-└── test_agy_pipeline.py    # Integration: Live multi-turn agy session bridge & memory
+├── test_issue_reporter.py     # Unit: Label normalization, fuzzy matching, and mock gh calls
+├── test_agent_manager.py      # Unit: SQLite conversation cloning, transcript parsing
+├── test_pipeline_backends.py  # Unit: backend selection, claude stream-json parsing, pipeline options
+├── test_events.py             # Unit: normalized live events for both CLIs
+├── test_message_log.py        # Unit: messages.jsonl records
+├── test_hub.py                # Unit: hub routing, caused_by chains, wait-cycle guard, socket API
+├── test_server_hub_mode.py    # Unit: message_agent / list_agents MCP tools
+├── test_cli.py                # Unit: landline command and event printing
+├── test_agy_pipeline.py       # Integration: Live multi-turn agy session bridge & memory
+└── test_claude_pipeline.py    # Integration: Live multi-turn claude session
 ```
 
 ---
@@ -21,8 +28,9 @@ tests/
 
 ### Run All Unit Tests (Fast, Offline)
 ```bash
-pytest tests/test_issue_reporter.py tests/test_agent_manager.py
+pytest tests --ignore=tests/test_agy_pipeline.py --ignore=tests/test_claude_pipeline.py
 ```
+`pyproject.toml` puts `src/` on the pytest path, so no install is needed to run tests.
 
 ### Run Specific Test Suites
 1. **GitHub Issue Reporter & Smart Labeling**:
