@@ -117,12 +117,15 @@ def cmd_up(args) -> int:
     print(f"  socket:   {hub.socket_path}")
     print("  talk to it with `landline send <agent> <text>`; Ctrl-C to stop.\n", flush=True)
 
+    # Handle SIGINT explicitly too: a hub launched in the background from a
+    # non-interactive shell inherits SIGINT as ignored, so Ctrl-C/kill -INT
+    # would otherwise never reach it.
     stop = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.set())
     try:
-        stop.wait()
-    except KeyboardInterrupt:
-        pass
+        while not stop.wait(0.5):
+            pass
     finally:
         print("\nStopping agents…")
         server.stop()
