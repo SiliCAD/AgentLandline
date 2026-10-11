@@ -111,6 +111,7 @@ def report_issue(
     title: str,
     body: str = "",
     label: str = "bug",
+    repo: str = "SiliCAD/AgentLandline",
     agent_model: str = "",
     session_id: str = "unknown",
     ctx: Context = None
@@ -122,15 +123,17 @@ def report_issue(
         title: Issue Title describing the problem, bug, or feature request.
         body: Issue Content in Markdown format (bug report, feature request, tracebacks, proposals, etc.).
         label: Issue Label ('bug', 'enhancement', 'feature-request', etc.).
+        repo: Target GitHub repository ('owner/repo', default: 'SiliCAD/AgentLandline').
         agent_model: Model name/version of the agent (e.g. 'gemini-3.6-flash', 'claude-3.5-sonnet').
         session_id: The conversation/session ID of the current agent turn.
     """
     detected_agent_name = get_client_agent_name(ctx)
-    logger.info(f"[TOOL CALL] report_issue: title={title!r}, detected_agent={detected_agent_name!r}, model={agent_model!r}, label={label!r}")
+    logger.info(f"[TOOL CALL] report_issue: title={title!r}, repo={repo!r}, detected_agent={detected_agent_name!r}, model={agent_model!r}, label={label!r}")
     return IssueReporter.create_issue(
         title=title,
         body=body,
         label=label,
+        repo=repo,
         agent_model=agent_model,
         session_id=session_id,
         agent_name=detected_agent_name

@@ -147,6 +147,7 @@ def report_issue(
     title: str,
     body: str = "",
     label: str = "bug",
+    repo: str = "SiliCAD/AgentLandline",
     agent_model: str = "",
     session_id: str = "unknown",
     ctx: Context = None
@@ -156,6 +157,7 @@ def report_issue(
   - `title`: Concise issue title.
   - `body`: Markdown-formatted issue body.
   - `label`: Target label (e.g. `'bug'`, `'enhancement'`). Automatically fuzzy-matched and created with a random hex color if missing.
+  - `repo`: Target GitHub repository (`owner/repo`, default: `'SiliCAD/AgentLandline'`).
   - `agent_model`: Model name (e.g. `'gemini-3.8-flash'`, `'claude-3.5-sonnet'`).
   - `session_id`: Caller session ID (defaults to `'unknown'`).
   - `ctx`: FastMCP context injected by the runtime.
