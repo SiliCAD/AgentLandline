@@ -256,3 +256,38 @@ def test_load_config(tmp_path):
     cfg.write_text(json.dumps({"agents": {"user": {}}}))
     with pytest.raises(HubError, match="reserved"):
         load_config(str(cfg))
+
+
+def test_agents_start_in_parallel_with_backend_timeouts(short_dir):
+    started = []
+
+    class SlowStart(FakePipeline):
+        def start(self, timeout=None):
+            started.append((self.spec.name, timeout))
+            import time
+            time.sleep(0.3)
+
+    def factory(spec, env):
+        return SlowStart(spec, env)
+
+    import time
+    hub = Hub([AgentSpec("a", backend="claude"), AgentSpec("b", backend="antigravity"), AgentSpec("c", backend="claude")],
+              run_id="t", home=short_dir, socket_path=os.path.join(short_dir, "s.sock"), pipeline_factory=factory)
+    t0 = time.monotonic()
+    hub.start()
+    try:
+        assert time.monotonic() - t0 < 0.8  # three 0.3s starts overlapped
+        assert dict(started) == {"a": 5.0, "b": 60.0, "c": 5.0}
+    finally:
+        hub.stop()
+
+
+def test_failed_agent_start_raises(short_dir):
+    class Broken(FakePipeline):
+        def start(self, timeout=None):
+            raise RuntimeError("claude process exited during startup")
+
+    hub = Hub([AgentSpec("a")], run_id="t", home=short_dir, socket_path=os.path.join(short_dir, "s.sock"),
+              pipeline_factory=lambda spec, env: Broken(spec, env))
+    with pytest.raises(HubError, match="a: claude process exited"):
+        hub.start()

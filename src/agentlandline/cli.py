@@ -104,18 +104,18 @@ def cmd_up(args) -> int:
 
     printer = EventPrinter()
     hub.subscribe(printer.handle)
+    print(f"Starting {', '.join(hub.agents)}…", flush=True)
     try:
         hub.start()
     except Exception as e:
         print(f"landline: failed to start agents: {e}", file=sys.stderr)
         server.stop()
-        hub.stop()
         return 1
 
     print(f"Hub '{hub.run_id}' is up with {', '.join(hub.agents)}.")
     print(f"  messages: {hub.log.path}")
     print(f"  socket:   {hub.socket_path}")
-    print("  talk to it with `landline send <agent> <text>`; Ctrl-C to stop.\n")
+    print("  talk to it with `landline send <agent> <text>`; Ctrl-C to stop.\n", flush=True)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

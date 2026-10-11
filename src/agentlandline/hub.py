@@ -153,10 +153,31 @@ class Hub:
         return AgyPipeline(cwd=spec.cwd, model=spec.model, effort=spec.effort,
                            conversation_id=spec.session_id, extra_env=env)
 
-    def start(self, timeout: float = 60.0):
+    # claude stays silent until its first prompt, so its start() always waits out
+    # the timeout; a short one is enough to catch a process that dies on launch.
+    START_TIMEOUTS = {"claude": 5.0, "antigravity": 60.0}
+
+    def start(self):
+        """Starts all agents in parallel; raises if any of them fails to start."""
+        errors: Dict[str, str] = {}
+
+        def _start(name: str, slot: _AgentSlot):
+            try:
+                slot.pipeline.add_event_listener(lambda raw: self._on_raw_event(name, raw))
+                slot.pipeline.start(timeout=self.START_TIMEOUTS.get(slot.spec.backend, 60.0))
+            except Exception as e:
+                errors[name] = str(e)
+
+        starters = [threading.Thread(target=_start, args=item) for item in self.agents.items()]
+        for t in starters:
+            t.start()
+        for t in starters:
+            t.join()
+        if errors:
+            self.stop()
+            raise HubError("; ".join(f"{name}: {err}" for name, err in errors.items()))
+
         for name, slot in self.agents.items():
-            slot.pipeline.add_event_listener(lambda raw, n=name: self._on_raw_event(n, raw))
-            slot.pipeline.start(timeout=timeout)
             slot.thread = threading.Thread(target=self._worker, args=(slot,), name=f"landline-{name}", daemon=True)
             slot.thread.start()
         self._write_run_file()
@@ -313,9 +334,10 @@ class Hub:
             f"You are agent '{slot.spec.name}' in a multi-agent session."
             + (f" Your role: {slot.spec.role}" if slot.spec.role else "")
             + f"\nOther agents:\n{others}\n"
-            "To talk to another agent, call the agent-landline `message_agent` tool with `to` and `text`; "
-            "it returns their reply. Messages to you arrive with a [landline message ...] header, and your "
-            "final response to a message is sent back to its sender.\n\n"
+            "Messages to you arrive with a [landline message <id> from <sender>] header. Just do what the "
+            "message asks and answer in your response: your final response is delivered back to the sender "
+            "automatically, so don't use a tool to reply. To ask another agent something yourself, call the "
+            "agent-landline `message_agent` tool with `to` and `text`; it returns their reply.\n\n"
         )
         return intro + header + record["text"]
 
