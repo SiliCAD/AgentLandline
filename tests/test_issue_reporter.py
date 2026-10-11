@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from issue_reporter import IssueReporter
+from agentlandline.issue_reporter import IssueReporter
 
 
 def test_normalize_label_text():
@@ -179,3 +179,85 @@ def test_create_issue_fallback_on_label_error():
         )
         assert "https://github.com/org/repo/issues/43" in res
         assert "labels omitted due to GitHub error" in res
+
+
+def test_create_issue_default_repo():
+    """Verifies that IssueReporter defaults to SiliCAD/AgentLandline and passes --repo."""
+    def mock_subp_run(cmd, *args, **kwargs):
+        if "label" in cmd and "list" in cmd:
+            return MagicMock(returncode=0, stdout='[{"name": "bug"}]')
+        if "issue" in cmd and "create" in cmd:
+            return MagicMock(returncode=0, stdout="https://github.com/SiliCAD/AgentLandline/issues/7\n")
+        return MagicMock(returncode=0, stdout="")
+
+    with patch("subprocess.run", side_effect=mock_subp_run) as mock_run:
+        res = IssueReporter.create_issue(
+            title="Default repo test",
+            body="Checking repo flag",
+            label="bug",
+            agent_name="test-agent"
+        )
+        assert "https://github.com/SiliCAD/AgentLandline/issues/7" in res
+
+        # Verify all gh calls include --repo SiliCAD/AgentLandline
+        for call in mock_run.call_args_list:
+            cmd = call[0][0]
+            assert "--repo" in cmd
+            repo_idx = cmd.index("--repo") + 1
+            assert cmd[repo_idx] == "SiliCAD/AgentLandline"
+
+
+def test_create_issue_custom_repo():
+    """Verifies that IssueReporter passes a custom repo to all gh commands."""
+    custom_repo = "SiliCAD/Arsenal"
+
+    def mock_subp_run(cmd, *args, **kwargs):
+        if "label" in cmd and "list" in cmd:
+            return MagicMock(returncode=0, stdout='[{"name": "bug"}]')
+        if "label" in cmd and "create" in cmd:
+            return MagicMock(returncode=0, stdout="")
+        if "issue" in cmd and "create" in cmd:
+            return MagicMock(returncode=0, stdout=f"https://github.com/{custom_repo}/issues/10\n")
+        return MagicMock(returncode=0, stdout="")
+
+    with patch("subprocess.run", side_effect=mock_subp_run) as mock_run:
+        res = IssueReporter.create_issue(
+            title="Custom repo test",
+            body="Checking custom repo flag",
+            label="new_category",
+            repo=custom_repo,
+            agent_name="ArsenalAgent"
+        )
+        assert f"https://github.com/{custom_repo}/issues/10" in res
+
+        for call in mock_run.call_args_list:
+            cmd = call[0][0]
+            assert "--repo" in cmd
+            repo_idx = cmd.index("--repo") + 1
+            assert cmd[repo_idx] == custom_repo
+
+
+def test_server_report_issue_tool_passes_repo():
+    """Verifies that server.report_issue passes repo to IssueReporter.create_issue."""
+    from agentlandline import server
+
+    with patch.object(IssueReporter, "create_issue", return_value="https://github.com/custom/repo/issues/1") as mock_create:
+        res = server.report_issue(
+            title="Test from MCP server",
+            body="Some bug",
+            label="bug",
+            repo="custom/target-repo",
+            agent_model="test-model",
+            session_id="session-123"
+        )
+        assert "https://github.com/custom/repo/issues/1" in res
+        mock_create.assert_called_once_with(
+            title="Test from MCP server",
+            body="Some bug",
+            label="bug",
+            repo="custom/target-repo",
+            agent_model="test-model",
+            session_id="session-123",
+            agent_name="unknown"
+        )
+

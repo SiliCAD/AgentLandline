@@ -55,6 +55,7 @@ class AgyPipeline:
         effort: Optional[str] = None,
         conversation_id: Optional[str] = None,
         extra_args: Optional[List[str]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
     ):
         self.cwd = cwd or os.getcwd()
         self.skip_permissions = skip_permissions
@@ -62,6 +63,8 @@ class AgyPipeline:
         self.effort = effort
         self.resume_conversation_id = conversation_id
         self.extra_args = extra_args or []
+        # Variables added on top of the inherited environment for the agy process.
+        self.extra_env = dict(extra_env or {})
 
         self.proc: Optional[subprocess.Popen] = None
         self.conversation_id: Optional[str] = conversation_id
@@ -126,6 +129,7 @@ class AgyPipeline:
         self.proc = subprocess.Popen(
             cmd,
             cwd=self.cwd,
+            env={**os.environ, **self.extra_env} if self.extra_env else None,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -238,25 +242,49 @@ class AgyPipeline:
 
             self._turn_done_event.set()
 
-    def _extract_recent_questions(self) -> List[Dict[str, Any]]:
-        """Extracts any ask_question tool calls from the recent turn in the conversation transcript."""
-        if not self.conversation_id:
-            return []
-
+    @staticmethod
+    def transcript_path_for(conversation_id: Optional[str]) -> Optional[str]:
+        """
+        Path of agy's on-disk step transcript for a conversation
+        (`<app-data>/brain/<id>/.system_generated/logs/transcript.jsonl`), or None
+        if it doesn't exist (yet). Unlike the stream, this transcript also carries
+        each model step's `thinking` text.
+        """
+        if not conversation_id:
+            return None
         candidates = [
-            os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{self.conversation_id}/.system_generated/logs/transcript.jsonl"),
-            os.path.expanduser(f"~/.gemini/antigravity-ide/brain/{self.conversation_id}/.system_generated/logs/transcript.jsonl"),
+            os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{conversation_id}/.system_generated/logs/transcript.jsonl"),
+            os.path.expanduser(f"~/.gemini/antigravity-ide/brain/{conversation_id}/.system_generated/logs/transcript.jsonl"),
         ]
         app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
         if app_data:
-            candidates.insert(0, os.path.join(app_data, "brain", self.conversation_id, ".system_generated", "logs", "transcript.jsonl"))
-
-        transcript_path = None
+            candidates.insert(0, os.path.join(app_data, "brain", conversation_id, ".system_generated", "logs", "transcript.jsonl"))
         for path in candidates:
             if os.path.exists(path):
-                transcript_path = path
-                break
+                return path
+        return None
 
+    def transcript_path(self) -> Optional[str]:
+        """Path of this conversation's on-disk transcript, or None if it doesn't exist (yet)."""
+        return self.transcript_path_for(self.conversation_id)
+
+    @staticmethod
+    def default_model() -> Optional[str]:
+        """
+        The model agy uses when none is passed, from its settings.json (e.g.
+        "Gemini 3.8 Flash (High)"). agy doesn't report its model on the stream.
+        """
+        app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or os.path.expanduser("~/.gemini/antigravity-cli")
+        try:
+            with open(os.path.join(app_data, "settings.json"), "r", encoding="utf-8") as f:
+                model = json.load(f).get("model")
+        except (OSError, ValueError, AttributeError):
+            return None
+        return model if isinstance(model, str) and model.strip() else None
+
+    def _extract_recent_questions(self) -> List[Dict[str, Any]]:
+        """Extracts any ask_question tool calls from the recent turn in the conversation transcript."""
+        transcript_path = self.transcript_path()
         if not transcript_path:
             return []
 

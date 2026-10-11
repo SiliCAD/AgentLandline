@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentlandline"
+dynamic = ["version"]
+description = "MCP server and Python engine driving headless agent CLI sessions (Antigravity agy, Claude Code)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "mcp>=1.0.0,<2",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+agentlandline-mcp = "agentlandline.server:main"
+landline = "agentlandline.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "agentlandline.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

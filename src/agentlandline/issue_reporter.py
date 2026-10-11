@@ -64,10 +64,16 @@ class IssueReporter:
         return f"{random.randint(0, 0xFFFFFF):06x}"
 
     @classmethod
-    def get_existing_labels(cls, cwd: Optional[str] = None) -> List[str]:
+    def get_existing_labels(
+        cls,
+        cwd: Optional[str] = None,
+        repo: Optional[str] = None
+    ) -> List[str]:
         """Fetches all existing label names from the GitHub repository."""
         try:
             cmd = ["gh", "label", "list", "--limit", "500", "--json", "name"]
+            if repo and repo.strip():
+                cmd.extend(["--repo", repo.strip()])
             res = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=cwd)
             data = json.loads(res.stdout)
             return [item["name"] for item in data if isinstance(item, dict) and "name" in item]
@@ -75,6 +81,8 @@ class IssueReporter:
             logger.debug(f"JSON label list failed ({e}), falling back to plain text parsing")
             try:
                 cmd = ["gh", "label", "list", "--limit", "500"]
+                if repo and repo.strip():
+                    cmd.extend(["--repo", repo.strip()])
                 res = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=cwd)
                 labels = []
                 for line in res.stdout.splitlines():
@@ -149,6 +157,7 @@ class IssueReporter:
         label_name: str,
         existing_labels: List[str],
         cwd: Optional[str] = None,
+        repo: Optional[str] = None,
         default_description: Optional[str] = None
     ) -> Optional[str]:
         """
@@ -174,6 +183,8 @@ class IssueReporter:
             "--description", description,
             "--color", random_color
         ]
+        if repo and repo.strip():
+            create_cmd.extend(["--repo", repo.strip()])
         try:
             subprocess.run(create_cmd, capture_output=True, text=True, check=True, cwd=cwd)
             logger.info(f"Created new GitHub label: {clean_name!r} (color: #{random_color})")
@@ -182,7 +193,7 @@ class IssueReporter:
         except subprocess.CalledProcessError as e:
             logger.warning(f"Label creation returned error for {clean_name!r}: {e.stderr.strip()}")
             # Check if it was created concurrently or already exists
-            current_labels = cls.get_existing_labels(cwd=cwd)
+            current_labels = cls.get_existing_labels(cwd=cwd, repo=repo)
             matched_now = cls.find_matching_label(clean_name, current_labels)
             if matched_now:
                 return matched_now
@@ -192,10 +203,15 @@ class IssueReporter:
             return None
 
     @classmethod
-    def ensure_label_exists(cls, label_name: str, cwd: Optional[str] = None) -> bool:
+    def ensure_label_exists(
+        cls,
+        label_name: str,
+        cwd: Optional[str] = None,
+        repo: Optional[str] = None
+    ) -> bool:
         """Checks if a label exists in the GitHub repository, creating it if missing."""
-        existing_labels = cls.get_existing_labels(cwd=cwd)
-        resolved = cls.resolve_or_create_label(label_name, existing_labels, cwd=cwd)
+        existing_labels = cls.get_existing_labels(cwd=cwd, repo=repo)
+        resolved = cls.resolve_or_create_label(label_name, existing_labels, cwd=cwd, repo=repo)
         return resolved is not None
 
     @classmethod
@@ -204,6 +220,7 @@ class IssueReporter:
         title: str,
         body: str = "",
         label: str = "bug",
+        repo: str = "SiliCAD/AgentLandline",
         agent_model: str = "",
         session_id: str = "unknown",
         agent_name: str = "unknown",
@@ -216,6 +233,8 @@ class IssueReporter:
         Returns:
             The URL of the created issue or an error message.
         """
+        target_repo = repo.strip() if (repo and repo.strip()) else "SiliCAD/AgentLandline"
+
         issue_body = cls.format_issue_body(
             body=body,
             label=label,
@@ -226,7 +245,7 @@ class IssueReporter:
         )
 
         # Load repository labels once for smart matching
-        existing_labels = cls.get_existing_labels(cwd=cwd)
+        existing_labels = cls.get_existing_labels(cwd=cwd, repo=target_repo)
 
         labels_to_apply: List[str] = []
 
@@ -238,6 +257,7 @@ class IssueReporter:
                     lbl,
                     existing_labels,
                     cwd=cwd,
+                    repo=target_repo,
                     default_description=f"Auto-created issue label: {lbl}"
                 )
                 if resolved and resolved not in labels_to_apply:
@@ -250,6 +270,7 @@ class IssueReporter:
                     agent_label,
                     existing_labels,
                     cwd=cwd,
+                    repo=target_repo,
                     default_description=f"Issues reported by {agent_label} AI Agent"
                 )
                 if resolved_agent and resolved_agent not in labels_to_apply:
@@ -257,6 +278,7 @@ class IssueReporter:
 
         cmd = [
             "gh", "issue", "create",
+            "--repo", target_repo,
             "--title", title,
             "--body", issue_body
         ]
@@ -264,7 +286,7 @@ class IssueReporter:
         for lbl in labels_to_apply:
             cmd.extend(["--label", lbl])
 
-        logger.info(f"Creating GitHub issue: title={title!r}, labels={labels_to_apply!r}, agent={agent_name!r}")
+        logger.info(f"Creating GitHub issue in repo {target_repo!r}: title={title!r}, labels={labels_to_apply!r}, agent={agent_name!r}")
 
         try:
             result = subprocess.run(
@@ -288,6 +310,7 @@ class IssueReporter:
                 logger.warning(f"gh issue create failed with label error ({stderr}). Retrying without labels...")
                 retry_cmd = [
                     "gh", "issue", "create",
+                    "--repo", target_repo,
                     "--title", title,
                     "--body", issue_body
                 ]

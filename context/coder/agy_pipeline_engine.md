@@ -1,6 +1,6 @@
 # Agy Subprocess Engine & Bidirectional Streaming Protocol
 
-This document provides a technical deep-dive into `src/agy_pipeline.py`, the core headless engine that bridges AgentLandline to running Antigravity CLI (`agy`) agent sessions.
+This document provides a technical deep-dive into `src/agentlandline/agy_pipeline.py`, the core headless engine that bridges AgentLandline to running Antigravity CLI (`agy`) agent sessions.
 
 ---
 
@@ -11,7 +11,7 @@ This document provides a technical deep-dive into `src/agy_pipeline.py`, the cor
 ```
 ┌────────────────────────────────────────────────────────┐
 │                   AgentLandline Engine                 │
-│                   (src/agy_pipeline.py)                │
+│                   (src/agentlandline/agy_pipeline.py)  │
 └──────────────┬──────────────────────────▲──────────────┘
                │                          │
    stdin (JSON │                          │ stdout (JSON events)

@@ -11,9 +11,9 @@ import shutil
 import sqlite3
 import logging
 from typing import Optional, Dict, Any, List, Union
-from agy_pipeline import AgyPipeline, AgentTurnResult
-from claude_pipeline import ClaudePipeline
-from pipeline_factory import normalize_backend, DEFAULT_BACKEND
+from .agy_pipeline import AgyPipeline, AgentTurnResult
+from .claude_pipeline import ClaudePipeline
+from .pipeline_factory import normalize_backend, DEFAULT_BACKEND
 
 logger = logging.getLogger("AgentManager")
 
@@ -214,20 +214,7 @@ class AgentManager:
         return self._extract_last_command_antigravity(target_conv_id)
 
     def _extract_last_command_antigravity(self, target_conv_id: str) -> Dict[str, Any]:
-        candidates = [
-            os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{target_conv_id}/.system_generated/logs/transcript.jsonl"),
-            os.path.expanduser(f"~/.gemini/antigravity-ide/brain/{target_conv_id}/.system_generated/logs/transcript.jsonl"),
-        ]
-        app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
-        if app_data:
-            candidates.insert(0, os.path.join(app_data, "brain", target_conv_id, ".system_generated", "logs", "transcript.jsonl"))
-
-        transcript_path = None
-        for path in candidates:
-            if os.path.exists(path):
-                transcript_path = path
-                break
-
+        transcript_path = AgyPipeline.transcript_path_for(target_conv_id)
         if not transcript_path:
             return {"error": f"Transcript file not found for conversation_id={target_conv_id}"}
 
@@ -279,11 +266,8 @@ class AgentManager:
 
     def _extract_last_command_claude(self, target_conv_id: str, cwd: str) -> Dict[str, Any]:
         """Reads Claude Code's `~/.claude/projects/<dir>/<session-id>.jsonl` transcript."""
-        config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
-        project_dir = ClaudePipeline.project_dir_for_cwd(cwd)
-        transcript_path = os.path.expanduser(os.path.join(config_dir, "projects", project_dir, f"{target_conv_id}.jsonl"))
-
-        if not os.path.exists(transcript_path):
+        transcript_path = ClaudePipeline.transcript_path_for(target_conv_id, cwd)
+        if not transcript_path:
             return {"error": f"Transcript file not found for conversation_id={target_conv_id}"}
 
         def _flatten_text(content_value) -> Optional[str]:

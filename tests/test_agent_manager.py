@@ -10,7 +10,7 @@ import tempfile
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from agent_manager import AgentManager
+from agentlandline.agent_manager import AgentManager
 
 
 def test_extract_last_command_long_turn(tmp_path=None):

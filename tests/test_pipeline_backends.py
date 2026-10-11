@@ -22,10 +22,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 import pytest
 
-from claude_pipeline import ClaudePipeline, AgentTurnResult
-from pipeline_factory import create_pipeline, normalize_backend
-from agy_pipeline import AgyPipeline
-from agent_manager import AgentManager
+from agentlandline.claude_pipeline import ClaudePipeline, AgentTurnResult
+from agentlandline.pipeline_factory import create_pipeline, normalize_backend
+from agentlandline.agy_pipeline import AgyPipeline
+from agentlandline.agent_manager import AgentManager
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ def test_claude_start_does_not_raise_when_init_never_arrives_but_process_is_aliv
     """A live-but-quiet process (the --resume case) must not be treated as a startup failure."""
     fake_proc = _FakeProc(poll_result=None)  # still running
     p = ClaudePipeline(cwd="/tmp", conversation_id="some-session")
-    with patch("claude_pipeline.subprocess.Popen", return_value=fake_proc):
+    with patch("agentlandline.claude_pipeline.subprocess.Popen", return_value=fake_proc):
         p.start(timeout=0.2)  # must return normally, not raise TimeoutError
     assert p._running is True
     assert p.proc is fake_proc
@@ -199,7 +199,7 @@ def test_claude_start_raises_with_stderr_when_process_dies_during_startup():
     """A process that actually exits during startup (bad args, auth failure, ...) must still raise."""
     fake_proc = _FakeProc(poll_result=1, stderr_text="Error: no conversation found with session ID: bogus")
     p = ClaudePipeline(cwd="/tmp", conversation_id="bogus")
-    with patch("claude_pipeline.subprocess.Popen", return_value=fake_proc):
+    with patch("agentlandline.claude_pipeline.subprocess.Popen", return_value=fake_proc):
         with pytest.raises(RuntimeError, match="no conversation found"):
             p.start(timeout=0.2)
 
@@ -436,3 +436,53 @@ def test_manager_fork_true_with_claude_backend_sets_fork_session_flag():
 
     assert captured["fork_session"] is True
     assert res["conversation_id"] == "forked-session-xyz"
+
+
+# ---------------------------------------------------------------------------
+# Hub-facing pipeline options: extra_env, stream_partial, transcript_path()
+# ---------------------------------------------------------------------------
+
+def test_claude_extra_env_is_layered_on_top_of_the_allowlist():
+    """Caller-supplied variables reach the child; inherited non-allowlisted ones still don't."""
+    p = ClaudePipeline(cwd="/tmp", extra_env={"LANDLINE_AGENT": "coder"})
+    with patch.dict(os.environ, {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-leak"}, clear=True):
+        env = p._build_env()
+    assert env["LANDLINE_AGENT"] == "coder"
+    assert env["PATH"] == "/usr/bin"
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_claude_stream_partial_adds_include_partial_messages_flag():
+    assert "--include-partial-messages" not in ClaudePipeline(cwd="/tmp")._build_command()
+    assert "--include-partial-messages" in ClaudePipeline(cwd="/tmp", stream_partial=True)._build_command()
+
+
+def test_agy_extra_env_is_passed_to_the_process():
+    fake_proc = _FakeProc(poll_result=None)
+    p = AgyPipeline(cwd="/tmp", extra_env={"LANDLINE_AGENT": "tester"})
+    with patch("agentlandline.agy_pipeline.subprocess.Popen", return_value=fake_proc) as popen:
+        with pytest.raises(TimeoutError):
+            p.start(timeout=0.1)  # no init event from the fake process
+    env = popen.call_args.kwargs["env"]
+    assert env["LANDLINE_AGENT"] == "tester"
+    assert env["PATH"] == os.environ["PATH"]
+
+
+def test_claude_transcript_path_resolves_under_config_dir(tmp_path):
+    cwd = "/Users/someone/proj"
+    session_dir = tmp_path / "projects" / ClaudePipeline.project_dir_for_cwd(cwd)
+    session_dir.mkdir(parents=True)
+    with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(tmp_path)}):
+        p = ClaudePipeline(cwd=cwd, conversation_id="abc")
+        assert p.transcript_path() is None  # not written yet
+        (session_dir / "abc.jsonl").write_text("{}\n")
+        assert p.transcript_path() == str(session_dir / "abc.jsonl")
+
+
+def test_agy_transcript_path_resolves_under_app_data_dir(tmp_path):
+    logs = tmp_path / "brain" / "conv-1" / ".system_generated" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "transcript.jsonl").write_text("{}\n")
+    with patch.dict(os.environ, {"ANTIGRAVITY_APP_DATA_DIR": str(tmp_path)}):
+        assert AgyPipeline.transcript_path_for("conv-1") == str(logs / "transcript.jsonl")
+        assert AgyPipeline.transcript_path_for("missing") is None

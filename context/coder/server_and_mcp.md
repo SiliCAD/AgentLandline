@@ -6,7 +6,7 @@ This document details the FastMCP server architecture, tool contracts, parameter
 
 ## 1. FastMCP Architecture Overview
 
-`src/server.py` hosts the MCP server entrypoint using [FastMCP](https://github.com/jlowin/fastmcp). The server communicates over standard input/output (stdio JSON-RPC) with MCP host applications (Antigravity IDE, `agy` CLI, Claude Desktop, Cursor, or custom runners).
+`src/agentlandline/server.py` hosts the MCP server entrypoint using [FastMCP](https://github.com/jlowin/fastmcp). The server communicates over standard input/output (stdio JSON-RPC) with MCP host applications (Antigravity IDE, `agy` CLI, Claude Desktop, Cursor, or custom runners).
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -17,7 +17,7 @@ This document details the FastMCP server architecture, tool contracts, parameter
                             ▼
 ┌────────────────────────────────────────────────────────┐
 │             AgentLandline (FastMCP Server)             │
-│                     src/server.py                      │
+│              src/agentlandline/server.py               │
 │                                                        │
 │  - initialize_agent  -> Launches/resumes agy session   │
 │  - send_prompt       -> Bidirectional turn dispatch    │
@@ -29,14 +29,14 @@ This document details the FastMCP server architecture, tool contracts, parameter
               ▼                            ▼
 ┌───────────────────────────┐ ┌──────────────────────────┐
 │       AgentManager        │ │      IssueReporter       │
-│    src/agent_manager.py   │ │   src/issue_reporter.py  │
+│     agent_manager.py      │ │    issue_reporter.py     │
 │  (Session & DB Forking)   │ │  (Smart Label Matching)  │
 └─────────────┬─────────────┘ └──────────────────────────┘
               │
               ▼
 ┌───────────────────────────┐
 │        AgyPipeline        │
-│     src/agy_pipeline.py   │
+│      agy_pipeline.py      │
 │ (Subprocess stream-json)  │
 └───────────────────────────┘
 ```
@@ -147,6 +147,7 @@ def report_issue(
     title: str,
     body: str = "",
     label: str = "bug",
+    repo: str = "SiliCAD/AgentLandline",
     agent_model: str = "",
     session_id: str = "unknown",
     ctx: Context = None
@@ -156,6 +157,7 @@ def report_issue(
   - `title`: Concise issue title.
   - `body`: Markdown-formatted issue body.
   - `label`: Target label (e.g. `'bug'`, `'enhancement'`). Automatically fuzzy-matched and created with a random hex color if missing.
+  - `repo`: Target GitHub repository (`owner/repo`, default: `'SiliCAD/AgentLandline'`).
   - `agent_model`: Model name (e.g. `'gemini-3.8-flash'`, `'claude-3.5-sonnet'`).
   - `session_id`: Caller session ID (defaults to `'unknown'`).
   - `ctx`: FastMCP context injected by the runtime.
@@ -165,7 +167,7 @@ def report_issue(
 
 ## 3. Client Agent Detection
 
-`src/server.py` implements `get_client_agent_name(ctx: Context)`:
+`src/agentlandline/server.py` implements `get_client_agent_name(ctx: Context)`:
 ```python
 def get_client_agent_name(ctx: Context = None) -> str:
     """Extracts client agent name from MCP initialization clientInfo metadata."""

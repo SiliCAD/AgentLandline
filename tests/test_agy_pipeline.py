@@ -10,7 +10,7 @@ import time
 # Ensure src is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from agy_pipeline import AgyPipeline
+from agentlandline.agy_pipeline import AgyPipeline
 
 def test_multi_turn_and_tools():
     print("========================================")

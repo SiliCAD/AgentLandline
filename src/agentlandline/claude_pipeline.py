@@ -67,6 +67,8 @@ class ClaudePipeline:
         permission_mode: Optional[str] = None,
         fork_session: bool = False,
         extra_args: Optional[List[str]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        stream_partial: bool = False,
     ):
         self.cwd = cwd or os.getcwd()
         self.skip_permissions = skip_permissions
@@ -77,6 +79,12 @@ class ClaudePipeline:
         # session id instead of continuing the original one (`--resume <id> --fork-session`).
         self.fork_session = fork_session
         self.extra_args = extra_args or []
+        # Variables the caller explicitly hands to the child, layered on top of the
+        # allowlisted environment (see _build_env); nothing is inherited implicitly.
+        self.extra_env = dict(extra_env or {})
+        # Ask the CLI to also stream partial message chunks (`stream_event` lines
+        # carrying text/thinking deltas) so text can be shown as it is generated.
+        self.stream_partial = stream_partial
 
         self.proc: Optional[subprocess.Popen] = None
         self.conversation_id: Optional[str] = conversation_id
@@ -126,6 +134,8 @@ class ClaudePipeline:
             "--verbose",
             "--disable-slash-commands"
         ]
+        if self.stream_partial:
+            cmd.append("--include-partial-messages")
         if self.skip_permissions:
             cmd.append("--dangerously-skip-permissions")
         elif self.permission_mode:
@@ -169,7 +179,9 @@ class ClaudePipeline:
         through. This also covers credential-bypass mechanisms not in that list.
         """
         current = os.environ
-        return {k: current[k] for k in self._ENV_PASSTHROUGH_KEYS if k in current}
+        env = {k: current[k] for k in self._ENV_PASSTHROUGH_KEYS if k in current}
+        env.update(self.extra_env)
+        return env
 
     def start(self, timeout: float = 30.0):
         """Starts the claude background process and waits for the 'system'/'init' event."""
@@ -338,16 +350,27 @@ class ClaudePipeline:
         abspath = os.path.abspath(cwd)
         return re.sub(r"[^a-zA-Z0-9]", "-", abspath)
 
+    @classmethod
+    def transcript_path_for(cls, conversation_id: Optional[str], cwd: str) -> Optional[str]:
+        """
+        Path of Claude Code's on-disk transcript for a session
+        (`~/.claude/projects/<dir>/<session-id>.jsonl`, root overridable via
+        $CLAUDE_CONFIG_DIR), or None if it doesn't exist (yet).
+        """
+        if not conversation_id:
+            return None
+        config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
+        path = os.path.expanduser(os.path.join(config_dir, "projects", cls.project_dir_for_cwd(cwd), f"{conversation_id}.jsonl"))
+        return path if os.path.exists(path) else None
+
+    def transcript_path(self) -> Optional[str]:
+        """Path of this session's on-disk transcript, or None if it doesn't exist (yet)."""
+        return self.transcript_path_for(self.conversation_id, self.cwd)
+
     def _extract_recent_questions(self) -> List[Dict[str, Any]]:
         """Extracts any AskUserQuestion tool calls from the recent turn in the session transcript."""
-        if not self.conversation_id:
-            return []
-
-        config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
-        project_dir = self.project_dir_for_cwd(self.cwd)
-        transcript_path = os.path.expanduser(os.path.join(config_dir, "projects", project_dir, f"{self.conversation_id}.jsonl"))
-
-        if not os.path.exists(transcript_path):
+        transcript_path = self.transcript_path()
+        if not transcript_path:
             return []
 
         questions = []

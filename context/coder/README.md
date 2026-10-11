@@ -6,19 +6,23 @@ Welcome to the **AgentLandline** developer and AI agent context specification. T
 
 ## 🏗 Repository Architecture & Component Map
 
-`AgentLandline` is a high-performance Model Context Protocol (MCP) server and Python orchestration engine providing a reliable, programmatic bridge to headless **Antigravity CLI (`agy`)** agent sessions.
+`AgentLandline` is a high-performance Model Context Protocol (MCP) server and Python orchestration engine providing a reliable, programmatic bridge to headless **Antigravity CLI (`agy`)** and **Claude Code CLI (`claude`)** agent sessions, plus a hub for running several of them together (`landline`).
 
 ```
 AgentLandline/
 ├── src/
-│   ├── server.py             # FastMCP server entry point & tool dispatch
-│   ├── agent_manager.py      # High-level session orchestration, DB fork, & transcript parsing
-│   ├── agy_pipeline.py       # Subprocess bridge launching agy (stream-json bidirectional pipes)
-│   └── issue_reporter.py     # GitHub Issue reporter with smart label normalization
-├── tests/
-│   ├── test_agent_manager.py # Unit tests for conversation database and transcript parsing
-│   ├── test_agy_pipeline.py  # Integration test for multi-turn streaming communication
-│   └── test_issue_reporter.py# Unit tests for fuzzy label matching and issue generation
+│   ├── server.py             # Shim for MCP configs that launch src/agentlandline/server.py
+│   └── agentlandline/        # Installable package (pip install -e .)
+│       ├── server.py         # FastMCP server entry point & tool dispatch (+ hub-mode tools)
+│       ├── agent_manager.py  # High-level session orchestration, DB fork, & transcript parsing
+│       ├── agy_pipeline.py   # Subprocess bridge launching agy (stream-json bidirectional pipes)
+│       ├── claude_pipeline.py# Subprocess bridge launching claude (stream-json)
+│       ├── hub.py            # Multi-agent hub: inboxes, routing, socket API
+│       ├── message_log.py    # messages.jsonl (who sent which message to whom)
+│       ├── events.py         # Normalized live events for both CLIs
+│       ├── cli.py            # `landline` command
+│       └── issue_reporter.py # GitHub Issue reporter with smart label normalization
+├── tests/                    # Unit tests (offline) + live *_pipeline.py integration tests
 ├── scripts/
 │   └── setup_agent_workspace.sh # Provisioning script for isolated agent workspaces
 ├── context/
@@ -88,6 +92,7 @@ Every AI agent working in this repository MUST strictly abide by the following n
 | **Issue Resolution, Branching & PRs** | [`context/coder/issue_resolution_workflow.md`](issue_resolution_workflow.md) | Dual-mode task intake, branching conventions, atomic commits, satisfaction gate, session ID inquiry, nested PRs, and PR formatting. |
 | **FastMCP Server & Tool Definitions** | [`context/coder/server_and_mcp.md`](server_and_mcp.md) | FastMCP tool signatures (`initialize_agent`, `send_prompt`, `agent_status`, `exit_agent`, `report_issue`), client agent detection, and error contracts. |
 | **Agy Engine & Stream-JSON Protocol** | [`context/coder/agy_pipeline_engine.md`](agy_pipeline_engine.md) | Subprocess bridge mechanics, `stream-json` parsing, token usage extraction, tool call tracking, timeout handling, and session teardown. |
+| **Multi-Agent Hub, Message Log & Live Events** | [`context/coder/multi_agent_hub.md`](multi_agent_hub.md) | Hub message flow, inboxes, wait-cycle guard, `messages.jsonl` schema, normalized event kinds, socket API, and per-CLI reasoning visibility. |
 | **Running Test Suites & Diagnostics** | [`context/coder/testing_and_maintenance.md`](testing_and_maintenance.md) | Pytest commands, test architecture, unit vs integration testing, and Python 3.10+ / 3.13 considerations. |
 
 ---
@@ -97,4 +102,5 @@ Every AI agent working in this repository MUST strictly abide by the following n
 - [`context/coder/issue_resolution_workflow.md`](issue_resolution_workflow.md): Standard operating procedure for issue resolution, cross-agent collaboration, nested PRs, and human review gates.
 - [`context/coder/server_and_mcp.md`](server_and_mcp.md): FastMCP server architecture, tool parameter specifications, and client agent metadata handling.
 - [`context/coder/agy_pipeline_engine.md`](agy_pipeline_engine.md): Technical deep-dive into `AgyPipeline`, bidirectional JSON streaming, and subprocess lifecycle management.
+- [`context/coder/multi_agent_hub.md`](multi_agent_hub.md): Multi-agent hub (`landline`), message log schema, live events, and socket API.
 - [`context/coder/testing_and_maintenance.md`](testing_and_maintenance.md): Complete testing guide, running unit test suites with `pytest`, and environment compatibility.
