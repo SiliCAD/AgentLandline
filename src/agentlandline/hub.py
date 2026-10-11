@@ -159,7 +159,7 @@ class Hub:
         self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
         self._lock = threading.Lock()
         self._waiting_on: Dict[str, str] = {}  # agent -> agent whose reply it is waiting for
-        self._spawn_lock = threading.Lock()
+        self._starting: set = set()  # names of agents being spawned right now
         self.agents: Dict[str, _AgentSlot] = {}
         for spec in specs:
             self.agents[spec.name] = self._new_slot(spec)
@@ -228,9 +228,12 @@ class Hub:
         Starts a new agent in the running hub. The other agents are told about
         it with their next message. Returns its list_agents() entry.
         """
-        with self._spawn_lock:
-            if spec.name in self.agents:
+        # Only the name is reserved under the lock, so several agents can start at once.
+        with self._lock:
+            if spec.name in self.agents or spec.name in self._starting:
                 raise HubError(f"An agent named '{spec.name}' already exists.")
+            self._starting.add(spec.name)
+        try:
             slot = self._new_slot(spec)
             try:
                 self._start_pipeline(slot)
@@ -242,7 +245,10 @@ class Hub:
                 raise HubError(f"Couldn't start '{spec.name}': {e}")
             with self._lock:
                 self.agents[spec.name] = slot
-            self._start_worker(slot)
+        finally:
+            with self._lock:
+                self._starting.discard(spec.name)
+        self._start_worker(slot)
         self._write_run_file()
         info = self._agent_info(slot)
         self._emit({"kind": "agent_added", "agent": spec.name, "info": info})

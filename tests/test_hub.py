@@ -460,3 +460,34 @@ def test_empty_hub_starts_and_takes_spawns(short_dir):
         assert hub.send("user", "solo", "hi")["reply"]["text"] == "solo got it"
     finally:
         hub.stop()
+
+
+def test_spawns_start_in_parallel_and_names_stay_unique(short_dir):
+    import time
+
+    class SlowStart(FakePipeline):
+        def start(self, timeout=None):
+            time.sleep(0.4)
+
+    hub = Hub([], run_id="par", home=short_dir, socket_path=os.path.join(short_dir, "p.sock"),
+              pipeline_factory=lambda spec, env: SlowStart(spec, env))
+    hub.start()
+    results, errors = [], []
+
+    def spawn(name):
+        try:
+            results.append(hub.spawn(AgentSpec(name))["name"])
+        except HubError as e:
+            errors.append(str(e))
+    try:
+        t0 = time.monotonic()
+        threads = [threading.Thread(target=spawn, args=(n,)) for n in ("a", "b", "c", "a")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert time.monotonic() - t0 < 1.0  # four 0.4s starts overlapped
+        assert sorted(results) == ["a", "b", "c"]
+        assert errors == ["An agent named 'a' already exists."]
+    finally:
+        hub.stop()
