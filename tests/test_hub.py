@@ -491,3 +491,18 @@ def test_spawns_start_in_parallel_and_names_stay_unique(short_dir):
         assert errors == ["An agent named 'a' already exists."]
     finally:
         hub.stop()
+
+
+def test_run_file_records_the_folder_each_agent_works_in(short_dir):
+    hub, pipelines = make_hub(short_dir, {}, a={}, b={"cwd": "/tmp"})
+    try:
+        pipelines["a"].cwd = "/Users/someone/project"  # pipelines default to the hub's folder
+        hub._write_run_file()
+        data = json.load(open(os.path.join(short_dir, "runs", "test-run", "run.json")))
+        assert data["agents"]["a"]["cwd"] == "/Users/someone/project"
+        assert data["agents"]["b"]["cwd"] == "/tmp"
+        assert data["cwd"] == os.getcwd()
+        reloaded = {s.name: s for s in load_config(os.path.join(short_dir, "runs", "test-run", "run.json"))["agents"]}
+        assert reloaded["a"].cwd == "/Users/someone/project"
+    finally:
+        hub.stop()

@@ -461,10 +461,14 @@ class Hub:
         data = {
             "run": self.run_id,
             "started": self.started_at,
+            "cwd": os.getcwd(),
             "socket": self.socket_path,
             "messages": self.log.path,
             "agents": {
                 name: {**{k: v for k, v in asdict(slot.spec).items() if k != "name"},
+                       # The folder the agent actually works in, even when the config left it
+                       # to the hub's folder: resuming needs it (claude finds sessions by folder).
+                       "cwd": slot.spec.cwd or getattr(slot.pipeline, "cwd", None),
                        "session_id": slot.session_id,
                        "model_in_use": self.model_in_use(slot),
                        "transcript": slot.pipeline.transcript_path()}
