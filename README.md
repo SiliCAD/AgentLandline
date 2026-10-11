@@ -155,8 +155,9 @@ landline messages    # the run's message log
 
 Agents talk to each other with the `message_agent(to, text, wait=True)` and `list_agents()` MCP tools. These appear automatically in agents started by the hub, provided agent-landline is in that CLI's MCP config. A message that arrives while an agent is busy waits until its current turn ends, and an agent's final response to a message is delivered back to the sender.
 
-**Adding agents while it runs.** `landline spawn <claude|agy> <name> [--model --effort --cwd --role]` starts
-another agent in the running hub. The agents already there are told who joined, and its role, with their
+**Adding agents while it runs.** `landline up` with no config starts an empty hub.
+`landline spawn <claude|agy> <name> [--model --effort --cwd --role --session]` starts another agent in the
+running hub (`--session` resumes an existing CLI session). The agents already there are told who joined, and its role, with their
 next message.
 
 **Restarting a team.** The run's `run.json` lists every agent, including spawned ones, with their session
