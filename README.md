@@ -121,16 +121,22 @@ Run several named agents at once and let them work together, with you able to wa
 
 ```json
 {
-  "run": "opamp-2stage",
   "agents": {
-    "architect": {"backend": "claude", "model": "opus",   "cwd": "~/designs/opamp", "role": "Lead designer"},
-    "coder":     {"backend": "claude", "model": "sonnet", "cwd": "~/designs/opamp", "role": "Sizes devices, edits schematics"},
-    "tester":    {"backend": "agy",                       "cwd": "~/designs/opamp", "role": "Runs PVT, DRC and LVS"}
+    "planner":  {"backend": "claude", "role": "Plans the work, splits it into tasks, hands them to the coder and the reviewer, and reports the result to the user."},
+    "coder":    {"backend": "claude", "role": "Writes and changes code in this folder as asked."},
+    "reviewer": {"backend": "agy",    "role": "Reviews and runs the coder's work and reports any problems."}
   }
 }
 ```
 
-Per agent: `backend` (`claude`/`agy`), and optionally `model`, `effort`, `cwd`, `role`, and `session_id` to resume an existing CLI session.
+Per agent: `backend` (`claude`/`agy`, required), and optionally:
+
+- `role`: what the agent is for. Each agent is told its own role and the other agents' roles, so it knows whom to ask.
+- `cwd`: the folder it works in (default: the folder you run `landline up` from).
+- `model`, `effort`: passed to the CLI (default: the CLI's own).
+- `session_id`: resume an existing CLI session instead of starting a new one.
+
+At the top level, `run` names the run (default: a timestamp).
 
 **2. Start the hub.** It starts every agent and prints live activity: messages between agents, tool calls, text, and thinking where the CLI exposes it.
 
@@ -141,7 +147,7 @@ landline up examples/run.json
 **3. Talk to it** from another terminal:
 
 ```bash
-landline send architect "Design a 2-stage Miller opamp, GBW >= 50 MHz, PM >= 60 deg"
+landline send planner "Write a small script that prints the first 10 prime numbers, get it reviewed, and tell me the result"
 landline ls          # agents, busy/idle, session ids
 landline tail        # follow live activity
 landline messages    # the run's message log

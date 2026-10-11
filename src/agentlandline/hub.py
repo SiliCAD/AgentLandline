@@ -77,9 +77,9 @@ class AgentSpec:
 def load_config(path: str) -> Dict[str, Any]:
     """
     Reads a run config:
-        {"run": "opamp-2stage",                      (optional)
-         "agents": {"architect": {"backend": "claude", "model": "opus", "role": "..."},
-                    "coder":     {"backend": "agy", "cwd": "~/designs/opamp"}}}
+        {"run": "my-run",                            (optional)
+         "agents": {"planner": {"backend": "claude", "model": "opus", "role": "..."},
+                    "coder":   {"backend": "agy", "cwd": "~/projects/app"}}}
     Returns {"run": str|None, "agents": [AgentSpec, ...]}.
     """
     with open(path, "r", encoding="utf-8") as f:

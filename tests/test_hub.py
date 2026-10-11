@@ -291,3 +291,12 @@ def test_failed_agent_start_raises(short_dir):
               pipeline_factory=lambda spec, env: Broken(spec, env))
     with pytest.raises(HubError, match="a: claude process exited"):
         hub.start()
+
+
+def test_example_run_config_loads():
+    example = os.path.join(os.path.dirname(__file__), "..", "examples", "run.json")
+    loaded = load_config(example)
+    assert loaded["run"] is None
+    assert [(a.name, a.backend, a.cwd) for a in loaded["agents"]] == [
+        ("planner", "claude", None), ("coder", "claude", None), ("reviewer", "antigravity", None)]
+    assert all(a.role for a in loaded["agents"])

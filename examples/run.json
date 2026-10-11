@@ -1,22 +1,16 @@
 {
-  "run": "opamp-2stage",
   "agents": {
-    "architect": {
+    "planner": {
       "backend": "claude",
-      "model": "opus",
-      "cwd": "~/designs/opamp",
-      "role": "Lead designer. Owns the spec and the plan, delegates sizing to the coder and verification to the tester."
+      "role": "Plans the work, splits it into tasks, hands them to the coder and the reviewer, and reports the result to the user."
     },
     "coder": {
       "backend": "claude",
-      "model": "sonnet",
-      "cwd": "~/designs/opamp",
-      "role": "Implementation. Sizes devices and edits schematics and layout."
+      "role": "Writes and changes code in this folder as asked."
     },
-    "tester": {
+    "reviewer": {
       "backend": "agy",
-      "cwd": "~/designs/opamp",
-      "role": "Verification. Runs simulations, PVT corners, DRC and LVS, and reports pass/fail with numbers."
+      "role": "Reviews and runs the coder's work and reports any problems."
     }
   }
 }
