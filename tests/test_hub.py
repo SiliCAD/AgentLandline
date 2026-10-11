@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -505,4 +506,132 @@ def test_run_file_records_the_folder_each_agent_works_in(short_dir):
         reloaded = {s.name: s for s in load_config(os.path.join(short_dir, "runs", "test-run", "run.json"))["agents"]}
         assert reloaded["a"].cwd == "/Users/someone/project"
     finally:
+        hub.stop()
+
+
+# --- stopping single agents and renaming the session --------------------------
+
+class GatedPipeline(FakePipeline):
+    """send() blocks until released, like an agent in the middle of a long turn."""
+
+    def __init__(self, spec, env, behaviour=None):
+        super().__init__(spec, env, behaviour)
+        self.release = threading.Event()
+        self.entered = threading.Event()
+
+    def send(self, prompt, timeout=None):
+        self.entered.set()
+        self.release.wait(5)
+        return super().send(prompt, timeout)
+
+    def close(self):
+        self.release.set()  # closing the CLI ends the turn
+
+
+def test_stop_agent_removes_it_but_keeps_it_resumable(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={"role": "lead"}, b={"role": "helper"})
+    seen = []
+    hub.subscribe(seen.append)
+    try:
+        info = hub.stop_agent("b")
+        assert info["name"] == "b"
+        assert [a["name"] for a in hub.list_agents()] == ["a"]
+        assert {"kind": "agent_removed", "agent": "b"}.items() <= seen[-1].items()
+        run_file = os.path.join(short_dir, "runs", "test-run", "run.json")
+        data = json.load(open(run_file))
+        assert data["agents"]["b"]["stopped"] is True and "stopped" not in data["agents"]["a"]
+        assert {s.name for s in load_config(run_file)["agents"]} == {"a", "b"}  # resume brings it back
+        with pytest.raises(HubError, match="Unknown agent 'b'"):
+            hub.send("user", "b", "hi")
+        with pytest.raises(HubError, match="Unknown agent 'zz'"):
+            hub.stop_agent("zz")
+    finally:
+        hub.stop()
+
+
+def test_stopping_a_busy_agent_fails_its_messages_without_fake_replies(short_dir):
+    pipelines = {}
+
+    def factory(spec, env):
+        pipelines[spec.name] = (GatedPipeline if spec.name == "b" else FakePipeline)(spec, env)
+        return pipelines[spec.name]
+    hub = Hub([AgentSpec("a"), AgentSpec("b")], run_id="busy", home=short_dir,
+              socket_path=os.path.join(short_dir, "b.sock"), pipeline_factory=factory)
+    hub.start()
+    results = {}
+    try:
+        first = threading.Thread(target=lambda: results.setdefault("first", hub.send("user", "b", "long job")))
+        first.start()
+        assert pipelines["b"].entered.wait(5)  # b is mid-turn
+        second = threading.Thread(target=lambda: results.setdefault("second", hub.send("a", "b", "queued")))
+        second.start()
+        time.sleep(0.2)
+        hub.stop_agent("b")
+        first.join(5)
+        second.join(5)
+        assert results["first"]["status"] == "ERROR" and "stopped before replying" in results["first"]["error"]
+        assert results["second"]["status"] == "ERROR" and "was stopped" in results["second"]["error"]
+        assert [m["from"] for m in hub.log.read_all()] == ["user", "a"]  # no reply from b was invented
+    finally:
+        hub.stop()
+
+
+def test_agents_are_told_who_left_and_names_can_be_reused(short_dir):
+    hub, pipelines = make_hub(short_dir, {}, a={}, b={})
+    try:
+        hub.send("user", "a", "first")
+        hub.stop_agent("b")
+        hub.send("user", "a", "second")
+        assert pipelines["a"].prompts[1].startswith("Agents that have left the session: b\n")
+        hub.spawn(AgentSpec("b", role="back again"))
+        assert hub.send("user", "b", "hi")["status"] == "REPLIED"
+        data = json.load(open(os.path.join(short_dir, "runs", "test-run", "run.json")))
+        assert "stopped" not in data["agents"]["b"]
+    finally:
+        hub.stop()
+
+
+def test_rename_moves_the_session_and_logging_continues(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    seen = []
+    hub.subscribe(seen.append)
+    try:
+        hub.send("user", "a", "before")
+        assert hub.rename("opamp-review") == "opamp-review"
+        runs = os.path.join(short_dir, "runs")
+        assert not os.path.exists(os.path.join(runs, "test-run"))
+        hub.send("user", "a", "after")
+        texts = [m["text"] for m in MessageLogReader(os.path.join(runs, "opamp-review"))]
+        assert texts == ["before", "a got it", "after", "a got it"]
+        data = json.load(open(os.path.join(runs, "opamp-review", "run.json")))
+        assert data["run"] == "opamp-review" and data["messages"].endswith("opamp-review/messages.jsonl")
+        renamed = [e for e in seen if e["kind"] == "run_renamed"]
+        assert len(renamed) == 1 and renamed[0]["run"] == "opamp-review" and renamed[0]["previous"] == "test-run"
+        assert hub.rename("opamp-review") == "opamp-review"  # same name: nothing to do
+        os.makedirs(os.path.join(runs, "taken"))
+        with pytest.raises(HubError, match="already exists"):
+            hub.rename("taken")
+        with pytest.raises(HubError, match="Invalid session name"):
+            hub.rename("has spaces")
+    finally:
+        hub.stop()
+
+
+def MessageLogReader(run_dir):
+    from agentlandline.message_log import MessageLog
+    return MessageLog(run_dir).read_all()
+
+
+def test_stop_and_rename_over_the_socket(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        client = HubClient(hub.socket_path)
+        assert client.stop_agent("b")["ok"]
+        assert "Unknown agent" in client.stop_agent("b")["error"]
+        assert client.rename("my-session") == {"ok": True, "run": "my-session"}
+        assert client.list_agents()["run"] == "my-session"
+    finally:
+        server.stop()
         hub.stop()

@@ -38,6 +38,7 @@ logger = logging.getLogger("AgentLandlineHub")
 
 USER = "user"
 AGENT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
+RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def landline_home() -> str:
@@ -125,6 +126,7 @@ class _AgentSlot:
         self.current_trigger: Optional[str] = None  # message id that started the running turn
         self.busy = False
         self.introduced = False
+        self.stopping = False
         self.known_agents: set = set()  # other agents this agent has been told about
         self.reported_model: Optional[str] = None  # what the CLI says it is running
         # Session id from the CLI's init event. The pipelines notify listeners before
@@ -161,6 +163,9 @@ class Hub:
         self._waiting_on: Dict[str, str] = {}  # agent -> agent whose reply it is waiting for
         self._starting: set = set()  # names of agents being spawned right now
         self._run_file_lock = threading.Lock()  # run.json is rewritten from several threads
+        # Agents stopped with stop_agent(): kept in run.json (marked stopped) so the
+        # session can be resumed with them.
+        self._stopped: Dict[str, _AgentSlot] = {}
         self.agents: Dict[str, _AgentSlot] = {}
         for spec in specs:
             self.agents[spec.name] = self._new_slot(spec)
@@ -246,6 +251,7 @@ class Hub:
                 raise HubError(f"Couldn't start '{spec.name}': {e}")
             with self._lock:
                 self.agents[spec.name] = slot
+                self._stopped.pop(spec.name, None)
         finally:
             with self._lock:
                 self._starting.discard(spec.name)
@@ -255,6 +261,67 @@ class Hub:
         self._emit({"kind": "agent_added", "agent": spec.name, "info": info})
         logger.info(f"Spawned agent {spec.name} ({spec.backend})")
         return info
+
+    def stop_agent(self, name: str) -> Dict[str, Any]:
+        """
+        Stops one agent: its CLI process is closed, messages still queued for it
+        fail with 'stopped', and it stays in run.json (marked stopped) so resuming
+        the session can bring it back. Returns its last list_agents() entry.
+        """
+        with self._lock:
+            slot = self.agents.pop(name, None)
+            if slot is None:
+                raise HubError(f"Unknown agent '{name}'. Agents: {list(self.agents)}")
+            self._stopped[name] = slot
+            for waiter, target in list(self._waiting_on.items()):
+                if waiter == name:
+                    self._waiting_on.pop(waiter, None)
+        slot.stopping = True
+        info = self._agent_info(slot)
+        while True:
+            try:
+                delivery = slot.inbox.get_nowait()
+            except queue.Empty:
+                break
+            if delivery is not None:
+                delivery.error = f"Agent '{name}' was stopped."
+                delivery.done.set()
+        slot.inbox.put(None)
+        try:
+            slot.pipeline.close()
+        except Exception as e:
+            logger.warning(f"Error closing agent {name}: {e}")
+        self._write_run_file()
+        self._emit({"kind": "agent_removed", "agent": name})
+        logger.info(f"Stopped agent {name}")
+        return info
+
+    def rename(self, new_run_id: str) -> str:
+        """
+        Renames the session: its folder under runs/ moves to the new name, which
+        then identifies it everywhere (resume, listings). Returns the new id.
+        """
+        if not RUN_NAME.match(new_run_id or ""):
+            raise HubError(f"Invalid session name '{new_run_id}': use letters, digits, '.', '-' or '_' (up to 64).")
+        if new_run_id == self.run_id:
+            return self.run_id
+        new_dir = os.path.join(self.home, "runs", new_run_id)
+        if os.path.exists(new_dir):
+            raise HubError(f"A session named '{new_run_id}' already exists.")
+        old = self.run_id
+        # Hold the message log's and run.json's locks so nothing writes mid-move.
+        with self.log._lock, self._run_file_lock:
+            os.makedirs(os.path.dirname(new_dir), exist_ok=True)
+            if os.path.exists(self.run_dir):
+                os.rename(self.run_dir, new_dir)
+            self.run_dir = new_dir
+            self.log.run_dir = new_dir
+            self.log.path = os.path.join(new_dir, MessageLog.FILENAME)
+            self.run_id = new_run_id
+        self._write_run_file()
+        self._emit({"kind": "run_renamed", "run": new_run_id, "previous": old})
+        logger.info(f"Renamed session {old} -> {new_run_id}")
+        return new_run_id
 
     def stop(self):
         for slot in self._slots():
@@ -337,7 +404,11 @@ class Hub:
         if wait and sender != USER:
             with self._lock:
                 self._waiting_on[sender] = to
-        self.agents[to].inbox.put(delivery)
+        target = self.agents[to]
+        target.inbox.put(delivery)
+        if target.stopping:  # stopped between the lookup and the put
+            delivery.error = f"Agent '{to}' was stopped."
+            delivery.done.set()
         if not wait:
             return {"status": "QUEUED", "message": record}
 
@@ -387,8 +458,11 @@ class Hub:
             self._emit({"kind": "turn_start", "agent": slot.spec.name, "message_id": record["id"]})
             try:
                 result = slot.pipeline.send(self._frame(slot, record), timeout=None)
-                reply_text = result.response or f"[{result.status}] {result.error or 'no response'}"
-                delivery.reply = self._record(slot.spec.name, record["from"], reply_text, caused_by=record["id"])
+                if slot.stopping:
+                    delivery.error = f"Agent '{slot.spec.name}' was stopped before replying."
+                else:
+                    reply_text = result.response or f"[{result.status}] {result.error or 'no response'}"
+                    delivery.reply = self._record(slot.spec.name, record["from"], reply_text, caused_by=record["id"])
             except Exception as e:
                 logger.error(f"Agent {slot.spec.name} failed handling {record['id']}: {e}")
                 delivery.error = str(e)
@@ -406,11 +480,14 @@ class Hub:
         others_now = [s for s in self._slots() if s is not slot]
         if slot.introduced:
             joined = [s for s in others_now if s.spec.name not in slot.known_agents]
-            slot.known_agents.update(s.spec.name for s in joined)
-            if not joined:
-                return header + record["text"]
-            note = "New agents have joined the session:\n" + "\n".join(self._describe(s) for s in joined) + "\n\n"
-            return note + header + record["text"]
+            left = sorted(slot.known_agents - {s.spec.name for s in others_now})
+            slot.known_agents = {s.spec.name for s in others_now}
+            note = ""
+            if joined:
+                note += "New agents have joined the session:\n" + "\n".join(self._describe(s) for s in joined) + "\n"
+            if left:
+                note += "Agents that have left the session: " + ", ".join(left) + "\n"
+            return (note + "\n" if note else "") + header + record["text"]
         slot.introduced = True
         slot.known_agents = {s.spec.name for s in others_now}
         others = "\n".join(self._describe(s) for s in others_now)
@@ -457,6 +534,12 @@ class Hub:
     def list_agents(self) -> List[Dict[str, Any]]:
         return [self._agent_info(slot) for slot in self._slots()]
 
+    def _run_file_agents(self):
+        with self._lock:
+            live = [(s.spec.name, s) for s in self.agents.values()]
+            stopped = [(n, s) for n, s in self._stopped.items() if n not in self.agents]
+        return live + stopped
+
     def _write_run_file(self):
         data = {
             "run": self.run_id,
@@ -471,8 +554,9 @@ class Hub:
                        "cwd": slot.spec.cwd or getattr(slot.pipeline, "cwd", None),
                        "session_id": slot.session_id,
                        "model_in_use": self.model_in_use(slot),
+                       **({"stopped": True} if slot.stopping else {}),
                        "transcript": slot.pipeline.transcript_path()}
-                for name, slot in ((s.spec.name, s) for s in self._slots())
+                for name, slot in self._run_file_agents()
             },
         }
         os.makedirs(self.run_dir, exist_ok=True)
@@ -521,6 +605,10 @@ class HubServer:
                         fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id")}
                         info = hub.spawn(AgentSpec.from_dict(request.get("name") or "", fields))
                         self._reply({"ok": True, "agent": info})
+                    elif op == "stop":
+                        self._reply({"ok": True, "agent": hub.stop_agent(request.get("name") or "")})
+                    elif op == "rename":
+                        self._reply({"ok": True, "run": hub.rename(request.get("run") or "")})
                     elif op == "list":
                         self._reply({"ok": True, "run": hub.run_id, "agents": hub.list_agents()})
                     elif op == "messages":
@@ -599,6 +687,12 @@ class HubClient:
 
     def list_agents(self) -> Dict[str, Any]:
         return self.request({"op": "list"})
+
+    def stop_agent(self, name: str) -> Dict[str, Any]:
+        return self.request({"op": "stop", "name": name})
+
+    def rename(self, run_id: str) -> Dict[str, Any]:
+        return self.request({"op": "rename", "run": run_id})
 
     def spawn(self, name: str, backend: str, model: Optional[str] = None, effort: Optional[str] = None,
               cwd: Optional[str] = None, role: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:

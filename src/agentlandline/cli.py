@@ -4,6 +4,8 @@
     landline up [run.json]         start a hub (with the agents in run.json) and print live activity
     landline send coder "..."      message an agent (as 'user') and print its reply
     landline spawn claude reviewer --role "..."   start another agent in the running hub
+    landline stop reviewer         stop one agent (resuming the session brings it back)
+    landline rename opamp-review   give the running session a memorable name
     landline ls                    list agents in the running hub
     landline tail                  follow live activity of the running hub
     landline messages              print the run's message log
@@ -160,6 +162,24 @@ def cmd_spawn(args) -> int:
     return 0
 
 
+def cmd_stop(args) -> int:
+    res = HubClient(args.socket).stop_agent(args.name)
+    if not res.get("ok"):
+        print(f"landline: {res.get('error')}", file=sys.stderr)
+        return 1
+    print(f"Stopped {args.name}.")
+    return 0
+
+
+def cmd_rename(args) -> int:
+    res = HubClient(args.socket).rename(args.run)
+    if not res.get("ok"):
+        print(f"landline: {res.get('error')}", file=sys.stderr)
+        return 1
+    print(f"Session renamed to {res['run']}.")
+    return 0
+
+
 def cmd_ls(args) -> int:
     res = HubClient(args.socket).list_agents()
     print(f"run: {res.get('run')}")
@@ -217,6 +237,14 @@ def build_parser() -> argparse.ArgumentParser:
     spawn.add_argument("--role", help="What this agent is for; the others are told")
     spawn.add_argument("--session", help="Resume this CLI session id instead of starting a new conversation")
     spawn.set_defaults(func=cmd_spawn)
+
+    stop = sub.add_parser("stop", help="Stop one agent in the running hub")
+    stop.add_argument("name")
+    stop.set_defaults(func=cmd_stop)
+
+    rename = sub.add_parser("rename", help="Rename the running session (its folder under runs/ moves)")
+    rename.add_argument("run", help="New session name: letters, digits, '.', '-' or '_'")
+    rename.set_defaults(func=cmd_rename)
 
     sub.add_parser("ls", help="List agents in the running hub").set_defaults(func=cmd_ls)
     sub.add_parser("tail", help="Follow live activity of the running hub").set_defaults(func=cmd_tail)
