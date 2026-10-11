@@ -635,3 +635,13 @@ def test_stop_and_rename_over_the_socket(short_dir):
     finally:
         server.stop()
         hub.stop()
+
+
+def test_all_is_reserved_like_user(tmp_path):
+    for name in ("all", "All", "user"):
+        with pytest.raises(HubError, match="Invalid agent name"):
+            AgentSpec.from_dict(name, {"backend": "claude"})
+    cfg = tmp_path / "run.json"
+    cfg.write_text(json.dumps({"agents": {"all": {}}}))
+    with pytest.raises(HubError, match="reserved"):
+        load_config(str(cfg))

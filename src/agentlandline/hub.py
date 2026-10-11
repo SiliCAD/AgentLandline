@@ -37,6 +37,8 @@ from .pipeline_factory import normalize_backend
 logger = logging.getLogger("AgentLandlineHub")
 
 USER = "user"
+# Names that address something other than one agent: the user, and '@all' (every agent) in viewers.
+RESERVED_NAMES = {USER, "all"}
 AGENT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -69,8 +71,9 @@ class AgentSpec:
 
     @classmethod
     def from_dict(cls, name: str, data: Dict[str, Any]) -> "AgentSpec":
-        if not AGENT_NAME.match(name or "") or name == USER:
-            raise HubError(f"Invalid agent name '{name}': use letters, digits, - or _ (start with a letter), and not '{USER}'.")
+        if not AGENT_NAME.match(name or "") or name.lower() in RESERVED_NAMES:
+            raise HubError(f"Invalid agent name '{name}': use letters, digits, - or _ (start with a letter), "
+                           f"and not {' or '.join(repr(n) for n in sorted(RESERVED_NAMES))}.")
         known = {k: data[k] for k in ("backend", "model", "effort", "cwd", "role", "session_id") if data.get(k) is not None}
         spec = cls(name=name, **known)
         try:
@@ -103,8 +106,8 @@ def load_config(path: str) -> Dict[str, Any]:
     if not isinstance(agents, dict) or not agents:
         raise HubError(f"{path}: 'agents' must be a non-empty object of name -> settings")
     for name in agents:
-        if name == USER:
-            raise HubError(f"{path}: '{USER}' is reserved and can't be an agent name")
+        if name.lower() in RESERVED_NAMES:
+            raise HubError(f"{path}: '{name}' is reserved and can't be an agent name")
     # A run's own run.json (written by the hub) is also a valid config: it lists
     # every agent, including ones spawned while it ran, with their session ids.
     return {"run": data.get("run"), "agents": [AgentSpec.from_dict(n, a or {}) for n, a in agents.items()]}
