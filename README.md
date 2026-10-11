@@ -148,6 +148,8 @@ landline up run.json
 ```bash
 landline send planner "Write a small script that prints the first 10 prime numbers, get it reviewed, and tell me the result"
 landline spawn claude reviewer --model sonnet --role "Reviews the coder's changes"   # add an agent
+landline stop reviewer           # stop one agent (resuming the session brings it back)
+landline rename opamp-review     # give the session a memorable name
 landline ls          # agents, busy/idle, session ids
 landline tail        # follow live activity
 landline messages    # the run's message log
@@ -159,6 +161,11 @@ Agents talk to each other with the `message_agent(to, text, wait=True)` and `lis
 `landline spawn <claude|agy> <name> [--model --effort --cwd --role --session]` starts another agent in the
 running hub (`--session` resumes an existing CLI session). The agents already there are told who joined, and its role, with their
 next message.
+
+**Stopping one agent and naming the session.** `landline stop <name>` closes one agent: messages still
+queued for it fail with "stopped", and the other agents are told it left. It stays in the run's `run.json`
+marked `"stopped": true`, so resuming the session brings it back. `landline rename <name>` renames the
+running session: its folder under `runs/` moves to the new name, which then identifies it everywhere.
 
 **Restarting a team.** The run's `run.json` lists every agent, including spawned ones, with their session
 ids, and is itself a valid config: `landline up ~/.agentlandline/runs/<run>/run.json` brings the whole team

@@ -45,6 +45,14 @@ landline up run.json
   next message (`New agents have joined the session:` + name and role); a new agent's intro lists
   everyone. Names must match `[A-Za-z][A-Za-z0-9_-]{0,31}` and can't be `user`. Agents are always read
   through `_slots()`, a locked snapshot, because spawning mutates `hub.agents` from another thread.
+- **Stopping**: `Hub.stop_agent(name)` (op `stop`, `landline stop`) closes one agent's CLI. Deliveries still in
+  its inbox fail with "was stopped"; a turn cut off mid-way records no reply (the waiting sender gets an
+  error instead). It moves to `_stopped` and stays in run.json with `"stopped": true`, so resuming the run
+  brings it back; re-spawning the name clears that. Agents are told `Agents that have left the session: …`
+  with their next message. A message that lands just as the agent stops is failed too (`slot.stopping`).
+- **Renaming**: `Hub.rename(new_id)` (op `rename`, `landline rename`) moves `runs/<old>` to `runs/<new>`
+  while holding the message log's and run.json's locks, then emits `run_renamed`. Names match
+  `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and must not exist yet.
 - Sending to `'user'` only records the message, since there is no inbox to deliver it to.
 - **Wait-cycle guard**: the hub tracks which agent is waiting on which. If A is waiting on B and B
   tries to wait on A (directly or through a longer chain), B gets a `HubError` explaining the
@@ -91,7 +99,8 @@ Copy the transcripts of runs worth keeping.
 | `turn_end` | `ok`, `duration_s`, `usage` |
 
 The hub adds `agent` and `ts` to each one, and also emits `message` (a full log record), `turn_start`
-(`message_id`), `idle`, and `agent_added` (`info`: the new agent's `list` entry). The `session` event
+(`message_id`), `idle`, `agent_added` (`info`: the new agent's `list` entry), `agent_removed`, and
+`run_renamed` (`run`, `previous`). The `session` event
 carries `model`: the model in use (claude reports it at startup; agy's comes from its settings). Live events are not persisted.
 
 **Reasoning visibility (verified against claude 2.1.x and agy 1.3.x):**
@@ -111,6 +120,8 @@ One JSON request line per connection, answered with one JSON line (`subscribe` k
 {"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true, "timeout": null}
 {"op": "list"}
 {"op": "messages"}
+{"op": "stop", "name": "reviewer"}
+{"op": "rename", "run": "opamp-review"}
 {"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "..."}
 {"op": "subscribe"}
 ```
