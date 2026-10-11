@@ -82,8 +82,15 @@ def load_config(path: str) -> Dict[str, Any]:
                     "coder":   {"backend": "agy", "cwd": "~/projects/app"}}}
     Returns {"run": str|None, "agents": [AgentSpec, ...]}.
     """
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        raise HubError(f"Run config not found: {os.path.abspath(path)}")
+    except ValueError as e:
+        raise HubError(f"{path} is not valid JSON: {e}")
+    if not isinstance(data, dict):
+        raise HubError(f"{path}: expected a JSON object with an 'agents' key")
     agents = data.get("agents") or {}
     if not isinstance(agents, dict) or not agents:
         raise HubError(f"{path}: 'agents' must be a non-empty object of name -> settings")

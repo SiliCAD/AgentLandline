@@ -300,3 +300,15 @@ def test_example_run_config_loads():
     assert [(a.name, a.backend, a.cwd) for a in loaded["agents"]] == [
         ("planner", "claude", None), ("coder", "claude", None), ("reviewer", "antigravity", None)]
     assert all(a.role for a in loaded["agents"])
+
+
+def test_load_config_errors_are_readable(tmp_path):
+    with pytest.raises(HubError, match="Run config not found: .*missing.json"):
+        load_config(str(tmp_path / "missing.json"))
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(HubError, match="not valid JSON"):
+        load_config(str(bad))
+    bad.write_text("[]")
+    with pytest.raises(HubError, match="expected a JSON object"):
+        load_config(str(bad))
