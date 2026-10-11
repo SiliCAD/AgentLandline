@@ -3,6 +3,7 @@
 
     landline up run.json           start the agents in run.json and print live activity
     landline send coder "..."      message an agent (as 'user') and print its reply
+    landline spawn claude reviewer --role "..."   start another agent in the running hub
     landline ls                    list agents in the running hub
     landline tail                  follow live activity of the running hub
     landline messages              print the run's message log
@@ -145,6 +146,18 @@ def cmd_send(args) -> int:
     return 0
 
 
+def cmd_spawn(args) -> int:
+    print(f"Starting {args.name}…", flush=True)
+    res = HubClient(args.socket).spawn(args.name, args.backend, model=args.model, effort=args.effort,
+                                       cwd=args.cwd, role=args.role)
+    if not res.get("ok"):
+        print(f"landline: {res.get('error')}", file=sys.stderr)
+        return 1
+    agent = res["agent"]
+    print(f"{agent['name']} is up ({agent['backend']}" + (f", {agent['model']}" if agent.get("model") else "") + ").")
+    return 0
+
+
 def cmd_ls(args) -> int:
     res = HubClient(args.socket).list_agents()
     print(f"run: {res.get('run')}")
@@ -191,6 +204,15 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--from", dest="sender", default="user", help="Sender name (default: user)")
     send.add_argument("--no-wait", action="store_true", help="Return once queued instead of waiting for the reply")
     send.set_defaults(func=cmd_send)
+
+    spawn = sub.add_parser("spawn", help="Start another agent in the running hub")
+    spawn.add_argument("backend", help="claude or agy")
+    spawn.add_argument("name")
+    spawn.add_argument("--model")
+    spawn.add_argument("--effort")
+    spawn.add_argument("--cwd", help="Working folder (default: where the hub was started)")
+    spawn.add_argument("--role", help="What this agent is for; the others are told")
+    spawn.set_defaults(func=cmd_spawn)
 
     sub.add_parser("ls", help="List agents in the running hub").set_defaults(func=cmd_ls)
     sub.add_parser("tail", help="Follow live activity of the running hub").set_defaults(func=cmd_tail)

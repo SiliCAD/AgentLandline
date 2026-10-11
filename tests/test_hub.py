@@ -333,3 +333,93 @@ def test_agy_default_model_missing_settings(tmp_path):
     from agentlandline.agy_pipeline import AgyPipeline
     with patch.dict(os.environ, {"ANTIGRAVITY_APP_DATA_DIR": str(tmp_path)}):
         assert AgyPipeline.default_model() is None
+
+
+# --- spawning agents at runtime ----------------------------------------------
+
+def test_spawn_adds_a_working_agent(short_dir):
+    hub, pipelines = make_hub(short_dir, {}, a={"role": "lead"}, b={})
+    seen = []
+    hub.subscribe(seen.append)
+    try:
+        info = hub.spawn(AgentSpec("c", backend="claude", model="sonnet", role="reviews"))
+        assert info["name"] == "c" and info["model"] == "sonnet" and info["role"] == "reviews"
+        assert [a["name"] for a in hub.list_agents()] == ["a", "b", "c"]
+        added = [e for e in seen if e["kind"] == "agent_added"]
+        assert added and added[0]["agent"] == "c" and added[0]["info"]["role"] == "reviews"
+        assert hub.send("user", "c", "hi")["reply"]["text"] == "c got it"
+        data = json.load(open(os.path.join(short_dir, "runs", "test-run", "run.json")))
+        assert data["agents"]["c"]["role"] == "reviews"
+    finally:
+        hub.stop()
+
+
+def test_spawn_rejects_bad_requests_and_failed_starts(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    try:
+        with pytest.raises(HubError, match="already exists"):
+            hub.spawn(AgentSpec("a"))
+        with pytest.raises(HubError, match="Invalid agent name"):
+            AgentSpec.from_dict("bad name!", {"backend": "claude"})
+        with pytest.raises(HubError, match="Invalid agent name"):
+            AgentSpec.from_dict("user", {"backend": "claude"})
+        with pytest.raises(HubError, match="Unknown agent backend"):
+            AgentSpec.from_dict("x", {"backend": "gpt"})
+
+        class Broken(FakePipeline):
+            def start(self, timeout=None):
+                raise RuntimeError("claude process exited during startup")
+        hub._pipeline_factory = lambda spec, env: Broken(spec, env)
+        with pytest.raises(HubError, match="Couldn't start 'x'"):
+            hub.spawn(AgentSpec("x"))
+        assert "x" not in hub.agents
+    finally:
+        hub.stop()
+
+
+def test_existing_agents_are_told_once_about_new_ones(short_dir):
+    hub, pipelines = make_hub(short_dir, {}, a={"role": "lead"}, b={})
+    try:
+        hub.send("user", "a", "first")  # intro: knows b
+        hub.spawn(AgentSpec("c", role="reviews"))
+        hub.send("user", "a", "second")
+        hub.send("user", "a", "third")
+        hub.send("user", "c", "hello")
+        first, second, third = pipelines["a"].prompts
+        assert "- b" in first and "- c" not in first
+        assert second.startswith("New agents have joined the session:\n- c: reviews\n")
+        assert "joined" not in third
+        c_intro = hub.agents["c"].pipeline.prompts[0]
+        assert "You are agent 'c'" in c_intro and "- a: lead" in c_intro and "- b" in c_intro
+    finally:
+        hub.stop()
+
+
+def test_spawn_over_the_socket(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        client = HubClient(hub.socket_path)
+        res = client.spawn("tester", "agy", role="runs tests")
+        assert res["ok"] and res["agent"]["backend"] == "antigravity"
+        assert client.spawn("tester", "claude")["error"].startswith("An agent named 'tester' already exists")
+        assert "Invalid agent name" in client.spawn("no spaces", "claude")["error"]
+    finally:
+        server.stop()
+        hub.stop()
+
+
+def test_run_file_can_restart_the_whole_team(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={"role": "lead"}, b={})
+    try:
+        hub.spawn(AgentSpec("c", backend="claude", model="sonnet", role="reviews"))
+    finally:
+        hub.stop()
+    loaded = load_config(os.path.join(short_dir, "runs", "test-run", "run.json"))
+    assert loaded["run"] == "test-run"
+    by_name = {a.name: a for a in loaded["agents"]}
+    assert set(by_name) == {"a", "b", "c"}
+    assert by_name["c"].model == "sonnet" and by_name["c"].role == "reviews"
+    assert by_name["c"].session_id == "session-c"  # resumes the same CLI session
+

@@ -77,3 +77,19 @@ def test_send_ls_and_messages_commands(short_dir, capsys):  # noqa: F811
 def test_commands_without_hub_fail_cleanly(short_dir, capsys):  # noqa: F811
     assert main(["--socket", os.path.join(short_dir, "none.sock"), "ls"]) == 1
     assert "landline up" in capsys.readouterr().err
+
+
+def test_spawn_command(short_dir, capsys):  # noqa: F811
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        sock = ["--socket", hub.socket_path]
+        assert main(sock + ["spawn", "claude", "reviewer", "--model", "sonnet", "--role", "reviews code"]) == 0
+        assert "reviewer is up (claude, sonnet)." in capsys.readouterr().out
+        assert "reviewer" in hub.agents and hub.agents["reviewer"].spec.role == "reviews code"
+        assert main(sock + ["spawn", "claude", "reviewer"]) == 1
+        assert "already exists" in capsys.readouterr().err
+    finally:
+        server.stop()
+        hub.stop()
