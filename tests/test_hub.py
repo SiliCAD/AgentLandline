@@ -436,3 +436,27 @@ def test_run_file_gets_session_id_even_before_pipeline_stores_it(short_dir):
         assert {a["name"]: a["session_id"] for a in hub.list_agents()}["a"] == "late-session"
     finally:
         hub.stop()
+
+
+def test_spawn_over_the_socket_can_resume_a_session(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        assert HubClient(hub.socket_path).spawn("c", "claude", session_id="old-session")["ok"]
+        assert hub.agents["c"].spec.session_id == "old-session"
+    finally:
+        server.stop()
+        hub.stop()
+
+
+def test_empty_hub_starts_and_takes_spawns(short_dir):
+    hub = Hub([], run_id="empty", home=short_dir, socket_path=os.path.join(short_dir, "e.sock"),
+              pipeline_factory=lambda spec, env: FakePipeline(spec, env))
+    hub.start()
+    try:
+        assert hub.list_agents() == []
+        hub.spawn(AgentSpec("solo"))
+        assert hub.send("user", "solo", "hi")["reply"]["text"] == "solo got it"
+    finally:
+        hub.stop()

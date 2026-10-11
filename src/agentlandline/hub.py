@@ -506,7 +506,7 @@ class HubServer:
                                           wait=request.get("wait", True), timeout=request.get("timeout"))
                         self._reply({"ok": True, **result})
                     elif op == "spawn":
-                        fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role")}
+                        fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id")}
                         info = hub.spawn(AgentSpec.from_dict(request.get("name") or "", fields))
                         self._reply({"ok": True, "agent": info})
                     elif op == "list":
@@ -589,10 +589,10 @@ class HubClient:
         return self.request({"op": "list"})
 
     def spawn(self, name: str, backend: str, model: Optional[str] = None, effort: Optional[str] = None,
-              cwd: Optional[str] = None, role: Optional[str] = None) -> Dict[str, Any]:
-        """Starts a new agent in the running hub; returns once it is up (or failed)."""
+              cwd: Optional[str] = None, role: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Starts a new agent in the running hub (resuming `session_id` if given); returns once it is up or failed."""
         return self.request({"op": "spawn", "name": name, "backend": backend, "model": model,
-                             "effort": effort, "cwd": cwd, "role": role})
+                             "effort": effort, "cwd": cwd, "role": role, "session_id": session_id})
 
     def messages(self) -> Dict[str, Any]:
         return self.request({"op": "messages"})
