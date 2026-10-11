@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 agentlandline-mcp = "agentlandline.server:main"
+landline = "agentlandline.cli:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "agentlandline.__version__" }
