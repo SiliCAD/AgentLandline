@@ -423,3 +423,16 @@ def test_run_file_can_restart_the_whole_team(short_dir):
     assert by_name["c"].model == "sonnet" and by_name["c"].role == "reviews"
     assert by_name["c"].session_id == "session-c"  # resumes the same CLI session
 
+
+def test_run_file_gets_session_id_even_before_pipeline_stores_it(short_dir):
+    # Real pipelines call listeners before setting conversation_id themselves.
+    hub, pipelines = make_hub(short_dir, {}, a={"backend": "claude"}, b={})
+    try:
+        pipelines["a"].conversation_id = None
+        for listener in pipelines["a"].listeners:
+            listener({"type": "system", "subtype": "init", "session_id": "late-session"})
+        data = json.load(open(os.path.join(short_dir, "runs", "test-run", "run.json")))
+        assert data["agents"]["a"]["session_id"] == "late-session"
+        assert {a["name"]: a["session_id"] for a in hub.list_agents()}["a"] == "late-session"
+    finally:
+        hub.stop()

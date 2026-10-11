@@ -127,6 +127,13 @@ class _AgentSlot:
         self.introduced = False
         self.known_agents: set = set()  # other agents this agent has been told about
         self.reported_model: Optional[str] = None  # what the CLI says it is running
+        # Session id from the CLI's init event. The pipelines notify listeners before
+        # they store it themselves, so the hub keeps its own copy for run.json.
+        self.reported_session: Optional[str] = None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        return self.pipeline.conversation_id or self.reported_session or self.spec.session_id
         self.thread: Optional[threading.Thread] = None
 
 
@@ -277,6 +284,7 @@ class Hub:
         for event in normalize(slot.spec.backend, raw):
             if event["kind"] == "session":
                 slot.reported_model = event.get("model") or slot.reported_model
+                slot.reported_session = event.get("session_id") or slot.reported_session
                 event = {**event, "model": self.model_in_use(slot)}
                 self._write_run_file()
             self._emit({**event, "agent": name})
@@ -433,7 +441,7 @@ class Hub:
             "model": self.model_in_use(slot),
             "effort": slot.spec.effort,
             "role": slot.spec.role,
-            "session_id": slot.pipeline.conversation_id,
+            "session_id": slot.session_id,
             "transcript": slot.pipeline.transcript_path(),
             "busy": slot.busy,
             "queued": slot.inbox.qsize(),
@@ -450,7 +458,7 @@ class Hub:
             "messages": self.log.path,
             "agents": {
                 name: {**{k: v for k, v in asdict(slot.spec).items() if k != "name"},
-                       "session_id": slot.pipeline.conversation_id or slot.spec.session_id,
+                       "session_id": slot.session_id,
                        "model_in_use": self.model_in_use(slot),
                        "transcript": slot.pipeline.transcript_path()}
                 for name, slot in ((s.spec.name, s) for s in self._slots())
