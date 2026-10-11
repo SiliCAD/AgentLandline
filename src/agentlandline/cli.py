@@ -96,7 +96,7 @@ def _print_json(data: Any):
 def cmd_up(args) -> int:
     try:
         config = load_config(args.config) if args.config else {"run": None, "agents": []}
-        hub = Hub(config["agents"], run_id=args.run or config["run"])
+        hub = Hub(config["agents"], run_id=args.run or config["run"], socket_path=args.socket)
         server = HubServer(hub)
         server.start()
     except HubError as e:
