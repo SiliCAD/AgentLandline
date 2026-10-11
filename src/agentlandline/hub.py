@@ -160,6 +160,7 @@ class Hub:
         self._lock = threading.Lock()
         self._waiting_on: Dict[str, str] = {}  # agent -> agent whose reply it is waiting for
         self._starting: set = set()  # names of agents being spawned right now
+        self._run_file_lock = threading.Lock()  # run.json is rewritten from several threads
         self.agents: Dict[str, _AgentSlot] = {}
         for spec in specs:
             self.agents[spec.name] = self._new_slot(spec)
@@ -472,9 +473,10 @@ class Hub:
         }
         os.makedirs(self.run_dir, exist_ok=True)
         tmp = os.path.join(self.run_dir, "run.json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, os.path.join(self.run_dir, "run.json"))
+        with self._run_file_lock:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, os.path.join(self.run_dir, "run.json"))
 
 
 # ---------------------------------------------------------------------------
