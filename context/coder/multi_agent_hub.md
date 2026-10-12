@@ -53,6 +53,10 @@ landline up run.json
 - **Renaming**: `Hub.rename(new_id)` (op `rename`, `landline rename`) moves `runs/<old>` to `runs/<new>`
   while holding the message log's and run.json's locks, then emits `run_renamed`. Names match
   `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and must not exist yet.
+- **Adopting**: `Hub.adopt(run_id)` (op `adopt`) makes a hub whose run has no messages yet continue a
+  saved run instead: the log moves to that run (numbering continues), its agents stay in run.json as saved
+  (`_dormant`) until spawned again, the empty run the hub started with is removed, and viewers get
+  `run_switched`. This is how a viewer resumes a session into a fresh hub without losing its history.
 - Sending to `'user'` only records the message, since there is no inbox to deliver it to.
 - **Wait-cycle guard**: the hub tracks which agent is waiting on which. If A is waiting on B and B
   tries to wait on A (directly or through a longer chain), B gets a `HubError` explaining the
@@ -122,6 +126,7 @@ One JSON request line per connection, answered with one JSON line (`subscribe` k
 {"op": "messages"}
 {"op": "stop", "name": "reviewer"}
 {"op": "rename", "run": "opamp-review"}
+{"op": "adopt", "run": "run-20261012-022025-7b62"}
 {"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "..."}
 {"op": "subscribe"}
 ```

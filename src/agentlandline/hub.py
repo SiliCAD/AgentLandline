@@ -21,6 +21,7 @@ import os
 import queue
 import re
 import socket
+import shutil
 import socketserver
 import threading
 import time
@@ -31,7 +32,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
 from .events import normalize, agy_completed_step, agy_step_thinking
-from .message_log import MessageLog
+from .message_log import MessageLog, count_lines
 from .pipeline_factory import normalize_backend
 
 logger = logging.getLogger("AgentLandlineHub")
@@ -169,6 +170,8 @@ class Hub:
         # Agents stopped with stop_agent(): kept in run.json (marked stopped) so the
         # session can be resumed with them.
         self._stopped: Dict[str, _AgentSlot] = {}
+        # Agents of an adopted run that aren't running (yet): kept in run.json as saved.
+        self._dormant: Dict[str, Dict[str, Any]] = {}
         self.agents: Dict[str, _AgentSlot] = {}
         for spec in specs:
             self.agents[spec.name] = self._new_slot(spec)
@@ -255,6 +258,7 @@ class Hub:
             with self._lock:
                 self.agents[spec.name] = slot
                 self._stopped.pop(spec.name, None)
+                self._dormant.pop(spec.name, None)
         finally:
             with self._lock:
                 self._starting.discard(spec.name)
@@ -298,6 +302,39 @@ class Hub:
         self._emit({"kind": "agent_removed", "agent": name})
         logger.info(f"Stopped agent {name}")
         return info
+
+    def adopt(self, run_id: str) -> str:
+        """
+        Continues a saved run instead of the current one, which must not have any
+        messages yet (e.g. a fresh hub before resuming a session into it). The
+        hub's log and run.json move to that run, message numbering continues
+        there, its agents stay listed in run.json until they're spawned again, and
+        the empty run the hub started with is removed. Returns the run id.
+        """
+        if run_id == self.run_id:
+            return run_id
+        target = os.path.join(self.home, "runs", run_id)
+        try:
+            with open(os.path.join(target, "run.json"), "r", encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            raise HubError(f"No saved session '{run_id}'.")
+        if count_lines(self.log.path):
+            raise HubError("This session already has messages, so it can't continue another one.")
+        old_id, old_dir = self.run_id, self.run_dir
+        with self.log._lock, self._run_file_lock:
+            self.run_id, self.run_dir = run_id, target
+            self.log = MessageLog(target)  # continues that run's numbering
+            self.started_at = saved.get("started") or self.started_at
+            with self._lock:
+                self._dormant = {n: a for n, a in (saved.get("agents") or {}).items()
+                                 if n not in self.agents and isinstance(a, dict)}
+        if os.path.isdir(old_dir) and not count_lines(os.path.join(old_dir, MessageLog.FILENAME)):
+            shutil.rmtree(old_dir, ignore_errors=True)
+        self._write_run_file()
+        self._emit({"kind": "run_switched", "run": run_id, "previous": old_id})
+        logger.info(f"Hub continues run {run_id} (was {old_id})")
+        return run_id
 
     def rename(self, new_run_id: str) -> str:
         """
@@ -562,6 +599,9 @@ class Hub:
                 for name, slot in self._run_file_agents()
             },
         }
+        with self._lock:
+            dormant = {n: a for n, a in self._dormant.items() if n not in data["agents"]}
+        data["agents"].update(dormant)
         os.makedirs(self.run_dir, exist_ok=True)
         tmp = os.path.join(self.run_dir, "run.json.tmp")
         with self._run_file_lock:
@@ -610,6 +650,8 @@ class HubServer:
                         self._reply({"ok": True, "agent": info})
                     elif op == "stop":
                         self._reply({"ok": True, "agent": hub.stop_agent(request.get("name") or "")})
+                    elif op == "adopt":
+                        self._reply({"ok": True, "run": hub.adopt(request.get("run") or "")})
                     elif op == "rename":
                         self._reply({"ok": True, "run": hub.rename(request.get("run") or "")})
                     elif op == "list":
@@ -696,6 +738,10 @@ class HubClient:
 
     def rename(self, run_id: str) -> Dict[str, Any]:
         return self.request({"op": "rename", "run": run_id})
+
+    def adopt(self, run_id: str) -> Dict[str, Any]:
+        """Makes the hub continue a saved run (only while the current run has no messages)."""
+        return self.request({"op": "adopt", "run": run_id})
 
     def spawn(self, name: str, backend: str, model: Optional[str] = None, effort: Optional[str] = None,
               cwd: Optional[str] = None, role: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:

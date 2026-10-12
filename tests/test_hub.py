@@ -645,3 +645,66 @@ def test_all_is_reserved_like_user(tmp_path):
     cfg.write_text(json.dumps({"agents": {"all": {}}}))
     with pytest.raises(HubError, match="reserved"):
         load_config(str(cfg))
+
+
+# --- continuing a saved run -------------------------------------------------
+
+def _saved_run(home, run_id, agents, messages):
+    run_dir = os.path.join(home, "runs", run_id)
+    os.makedirs(run_dir)
+    with open(os.path.join(run_dir, "run.json"), "w") as f:
+        json.dump({"run": run_id, "started": "2026-10-01T00:00:00Z", "agents": agents}, f)
+    from agentlandline.message_log import MessageLog
+    log = MessageLog(run_dir)
+    for text in messages:
+        log.append("user", next(iter(agents)), text)
+
+
+def test_adopt_continues_a_saved_run(short_dir):
+    _saved_run(short_dir, "old-session", {"a": {"backend": "claude", "session_id": "s-a"},
+                                          "z": {"backend": "agy", "session_id": "s-z", "role": "helper"}}, ["one", "two"])
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    seen = []
+    hub.subscribe(seen.append)
+    try:
+        fresh_dir = hub.run_dir
+        assert hub.adopt("old-session") == "old-session"
+        assert hub.run_id == "old-session" and not os.path.exists(fresh_dir)  # empty fresh run removed
+        hub.send("user", "a", "three")
+        assert [m["id"] for m in hub.log.read_all()] == ["m1", "m2", "m3", "m4"]  # numbering continues
+        data = json.load(open(os.path.join(short_dir, "runs", "old-session", "run.json")))
+        assert data["started"] == "2026-10-01T00:00:00Z"
+        assert data["agents"]["z"]["role"] == "helper"  # not running yet, still listed
+        hub.spawn(AgentSpec("z", backend="claude"))
+        data = json.load(open(os.path.join(short_dir, "runs", "old-session", "run.json")))
+        assert data["agents"]["z"]["backend"] == "claude"  # the running agent's entry now
+        assert [e for e in seen if e["kind"] == "run_switched"][0]["previous"] == "test-run"
+    finally:
+        hub.stop()
+
+
+def test_adopt_refuses_when_the_current_run_has_messages_or_the_run_is_unknown(short_dir):
+    _saved_run(short_dir, "old-session", {"a": {"backend": "claude"}}, ["one"])
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    try:
+        with pytest.raises(HubError, match="No saved session 'nope'"):
+            hub.adopt("nope")
+        hub.send("user", "a", "hi")
+        with pytest.raises(HubError, match="already has messages"):
+            hub.adopt("old-session")
+        assert hub.run_id == "test-run"
+    finally:
+        hub.stop()
+
+
+def test_adopt_over_the_socket(short_dir):
+    _saved_run(short_dir, "old-session", {"a": {"backend": "claude"}}, [])
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        assert HubClient(hub.socket_path).adopt("old-session") == {"ok": True, "run": "old-session"}
+        assert HubClient(hub.socket_path).list_agents()["run"] == "old-session"
+    finally:
+        server.stop()
+        hub.stop()
