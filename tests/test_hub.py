@@ -708,3 +708,21 @@ def test_adopt_over_the_socket(short_dir):
     finally:
         server.stop()
         hub.stop()
+
+
+def test_default_socket_is_per_folder(tmp_path, monkeypatch):
+    from agentlandline.hub import default_socket_path
+    monkeypatch.delenv("LANDLINE_SOCKET", raising=False)
+    monkeypatch.setenv("LANDLINE_HOME", str(tmp_path / "home"))
+    a, b = tmp_path / "opamp", tmp_path / "bandgap"
+    a.mkdir()
+    b.mkdir()
+    sock_a, sock_b = default_socket_path(str(a)), default_socket_path(str(b))
+    assert sock_a != sock_b
+    assert os.path.dirname(sock_a) == str(tmp_path / "home" / "hubs")
+    assert os.path.basename(sock_a).startswith("opamp-") and sock_a.endswith(".sock")
+    assert default_socket_path(str(a / ".")) == sock_a  # same folder, same hub
+    monkeypatch.chdir(a)
+    assert default_socket_path() == sock_a
+    monkeypatch.setenv("LANDLINE_SOCKET", "/tmp/explicit.sock")
+    assert default_socket_path(str(b)) == "/tmp/explicit.sock"

@@ -13,8 +13,11 @@ Hub: runs several named agent sessions side by side and routes messages between 
 
 Run state lives in `<home>/runs/<run_id>/` (home: $LANDLINE_HOME or
 ~/.agentlandline): `messages.jsonl` plus `run.json` (agents and session ids).
+Each folder gets its own hub socket by default (`<home>/hubs/<folder>-<hash>.sock`),
+so hubs started in different folders are independent.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -48,8 +51,18 @@ def landline_home() -> str:
     return os.path.expanduser(os.environ.get("LANDLINE_HOME") or "~/.agentlandline")
 
 
-def default_socket_path() -> str:
-    return os.environ.get("LANDLINE_SOCKET") or os.path.join(landline_home(), "hub.sock")
+def default_socket_path(folder: Optional[str] = None) -> str:
+    """
+    $LANDLINE_SOCKET, or the socket for `folder` (default: the current one):
+    <home>/hubs/<folder name>-<hash of its path>.sock. Hubs started in different
+    folders are independent; in the same folder, clients find the one running there.
+    """
+    if os.environ.get("LANDLINE_SOCKET"):
+        return os.environ["LANDLINE_SOCKET"]
+    folder = os.path.realpath(folder or os.getcwd())
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(folder) or "root")[:24]
+    digest = hashlib.sha1(folder.encode("utf-8")).hexdigest()[:8]
+    return os.path.join(landline_home(), "hubs", f"{name}-{digest}.sock")
 
 
 def _now() -> str:
@@ -715,7 +728,8 @@ class HubClient:
             s.connect(self.socket_path)
         except OSError as e:
             s.close()
-            raise HubError(f"No hub listening on {self.socket_path} ({e}). Start one with `landline up <config.json>`.")
+            raise HubError(f"No hub listening on {self.socket_path} ({e}). Each folder has its own hub: run this "
+                           f"in the folder where the hub was started, pass --socket, or start one with `landline up <config.json>`.")
         return s
 
     def request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
