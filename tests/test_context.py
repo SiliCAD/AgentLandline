@@ -34,9 +34,9 @@ class FakeClaude:
         rewind = spec.rewind
         if rewind:
             parent = SESSIONS[spec.session_id]
-            cut = next(i for i, (u, _) in enumerate(parent) if u == rewind["at"])
+            cut = next(i for i, (u, _) in enumerate(parent) if u == rewind["at"]) if rewind.get("at") else len(parent) - 1
             self.conversation_id = rewind["session_id"]
-            SESSIONS[self.conversation_id] = list(parent[: cut + 1])
+            SESSIONS[self.conversation_id] = list(parent[: cut + 1])  # a whole copy without "at"
         else:
             self.conversation_id = spec.session_id or f"session-{spec.name}-{uuid.uuid4().hex[:6]}"
             SESSIONS.setdefault(self.conversation_id, [])
