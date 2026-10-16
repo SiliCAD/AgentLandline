@@ -196,9 +196,39 @@ def list_agents() -> str:
     return json.dumps({"you": HUB_AGENT, "agents": agents}, indent=2)
 
 
+def manage_context(agent: str, action: str = "list", after: str = "", note: str = "") -> str:
+    """
+    Manage the context of an agent you are allowed to manage (see 'manages' in run.json).
+
+    action='list': the agent's turns in its current conversation, oldest first: each message it
+        answered (message_id, sender, start of the message), its reply, and how many tool calls it made.
+    action='rewind': cut the agent's conversation back to just after its reply to message `after`.
+        Everything it did later is removed from its memory, which makes its context smaller and its
+        turns faster. It keeps its name; files on disk are NOT changed. Use `note` to tell it what it
+        learned in the turns it loses (e.g. "approach X failed because Y"), so it doesn't repeat them.
+
+    Args:
+        agent: Name of the agent to manage.
+        action: 'list' or 'rewind'.
+        after: For rewind: the message_id (from list) whose reply the agent is cut back to.
+        note: For rewind: optional message sent to the agent once it has been rewound.
+    """
+    logger.info(f"[TOOL CALL] manage_context: from={HUB_AGENT!r} agent={agent!r} action={action!r} after={after!r}")
+    try:
+        res = _hub_client().context(HUB_AGENT, agent, action=action, after=after or None, note=note or None)
+    except HubError as e:
+        return json.dumps({"status": "ERROR", "error": str(e)}, indent=2)
+    if not res.get("ok"):
+        return json.dumps({"status": "ERROR", "error": res.get("error")}, indent=2)
+    res.pop("ok", None)
+    return json.dumps({"status": "OK", **res}, indent=2)
+
+
 if HUB_AGENT:
     mcp.tool()(message_agent)
     mcp.tool()(list_agents)
+    if os.environ.get("LANDLINE_MANAGES"):
+        mcp.tool()(manage_context)
 
 
 def main():

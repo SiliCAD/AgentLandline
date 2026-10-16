@@ -28,12 +28,14 @@ import shutil
 import socketserver
 import threading
 import time
-from dataclasses import dataclass, asdict, field
+import uuid
+from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
+from .context import Checkpoints, ContextError, REWIND_BACKENDS, normalize_manages, rules_for
 from .events import normalize, agy_completed_step, agy_step_thinking
 from .message_log import MessageLog, count_lines
 from .pipeline_factory import normalize_backend
@@ -82,6 +84,13 @@ class AgentSpec:
     cwd: Optional[str] = None
     role: Optional[str] = None
     session_id: Optional[str] = None  # resume an existing CLI session
+    # Agents whose context this agent may manage (agentlandline.context), in full form.
+    manages: Optional[Dict[str, Dict[str, Any]]] = None
+    # Sessions this agent had before it was rewound, newest last.
+    previous_sessions: List[str] = field(default_factory=list)
+    # Set only while starting a rewound copy: {"at": <message uuid>, "session_id": <the fork's id>}.
+    # Not saved in run.json.
+    rewind: Optional[Dict[str, str]] = None
 
     @classmethod
     def from_dict(cls, name: str, data: Dict[str, Any]) -> "AgentSpec":
@@ -90,6 +99,12 @@ class AgentSpec:
                            f"and not {' or '.join(repr(n) for n in sorted(RESERVED_NAMES))}.")
         known = {k: data[k] for k in ("backend", "model", "effort", "cwd", "role", "session_id") if data.get(k) is not None}
         spec = cls(name=name, **known)
+        try:
+            spec.manages = normalize_manages(data.get("manages"))
+        except ContextError as e:
+            raise HubError(f"Agent '{name}': {e}")
+        previous = data.get("previous_sessions") or []
+        spec.previous_sessions = [str(s) for s in previous] if isinstance(previous, list) else []
         try:
             spec.backend = normalize_backend(spec.backend)
         except ValueError as e:
@@ -149,6 +164,9 @@ class _AgentSlot:
         # Session id from the CLI's init event. The pipelines notify listeners before
         # they store it themselves, so the hub keeps its own copy for run.json.
         self.reported_session: Optional[str] = None
+        self.last_uuid: Optional[str] = None  # claude: the last assistant message of the running turn
+        self.turn_tools = 0                   # tool calls in the running turn
+        self.notice: Optional[str] = None     # put in front of the next message delivered to it
 
     @property
     def session_id(self) -> Optional[str]:
@@ -173,6 +191,7 @@ class Hub:
         self.run_dir = os.path.join(self.home, "runs", self.run_id)
         self.socket_path = socket_path or default_socket_path()
         self.log = MessageLog(self.run_dir)
+        self.checkpoints = Checkpoints(lambda: self.run_dir)
         self.started_at = _now()
         self._pipeline_factory = pipeline_factory or self._make_pipeline
         self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
@@ -191,6 +210,8 @@ class Hub:
 
     def _new_slot(self, spec: AgentSpec) -> _AgentSlot:
         env = {"LANDLINE_AGENT": spec.name, "LANDLINE_SOCKET": self.socket_path, "LANDLINE_RUN": self.run_id}
+        if spec.manages:
+            env["LANDLINE_MANAGES"] = "1"  # the agent gets the manage_context tool
         return _AgentSlot(spec, self._pipeline_factory(spec, env))
 
     def _slots(self) -> List[_AgentSlot]:
@@ -207,8 +228,11 @@ class Hub:
             # another agent's reply is itself mid tool call), so lift Claude
             # Code's MCP tool-call timeout for message_agent.
             env = {**env, "MCP_TOOL_TIMEOUT": str(24 * 3600 * 1000)}
+            rewind = spec.rewind or {}
             return ClaudePipeline(cwd=spec.cwd, model=spec.model, effort=spec.effort,
-                                  conversation_id=spec.session_id, extra_env=env, stream_partial=True)
+                                  conversation_id=spec.session_id, extra_env=env, stream_partial=True,
+                                  fork_session=bool(rewind), fork_session_id=rewind.get("session_id"),
+                                  resume_at=rewind.get("at"))
         return AgyPipeline(cwd=spec.cwd, model=spec.model, effort=spec.effort,
                            conversation_id=spec.session_id, extra_env=env)
 
@@ -408,7 +432,11 @@ class Hub:
 
     def _on_raw_event(self, name: str, raw: Dict[str, Any], slot: Optional[_AgentSlot] = None):
         slot = slot or self.agents[name]
+        if slot.spec.backend == "claude" and raw.get("type") == "assistant" and raw.get("uuid"):
+            slot.last_uuid = raw["uuid"]
         for event in normalize(slot.spec.backend, raw):
+            if event["kind"] == "tool_start":
+                slot.turn_tools += 1
             if event["kind"] == "session":
                 slot.reported_model = event.get("model") or slot.reported_model
                 slot.reported_session = event.get("session_id") or slot.reported_session
@@ -508,6 +536,7 @@ class Hub:
                 return
             record = delivery.record
             slot.busy, slot.current_trigger = True, record["id"]
+            slot.last_uuid, slot.turn_tools = None, 0
             self._emit({"kind": "turn_start", "agent": slot.spec.name, "message_id": record["id"]})
             try:
                 result = slot.pipeline.send(self._frame(slot, record), timeout=None)
@@ -516,6 +545,7 @@ class Hub:
                 else:
                     reply_text = result.response or f"[{result.status}] {result.error or 'no response'}"
                     delivery.reply = self._record(slot.spec.name, record["from"], reply_text, caused_by=record["id"])
+                    self._checkpoint(slot, record, delivery.reply, result)
             except Exception as e:
                 logger.error(f"Agent {slot.spec.name} failed handling {record['id']}: {e}")
                 delivery.error = str(e)
@@ -529,6 +559,10 @@ class Hub:
         return f"- {slot.spec.name}" + (f": {slot.spec.role}" if slot.spec.role else "")
 
     def _frame(self, slot: _AgentSlot, record: Dict[str, Any]) -> str:
+        notice, slot.notice = slot.notice, None
+        return (notice or "") + self._frame_message(slot, record)
+
+    def _frame_message(self, slot: _AgentSlot, record: Dict[str, Any]) -> str:
         header = f"[landline message {record['id']} from {record['from']}]\n"
         others_now = [s for s in self._slots() if s is not slot]
         if slot.introduced:
@@ -554,6 +588,134 @@ class Hub:
             "agent-landline `message_agent` tool with `to` and `text`; it returns their reply.\n\n"
         )
         return intro + header + record["text"]
+
+    # ---------------------------------------------------- context management
+
+    def _checkpoint(self, slot: _AgentSlot, record: Dict[str, Any], reply: Dict[str, Any], result):
+        """Records where the agent's conversation stood when it finished answering `record`."""
+        if slot.spec.backend not in REWIND_BACKENDS or not slot.last_uuid or getattr(result, "status", None) != "SUCCESS":
+            return
+        self.checkpoints.append({
+            "agent": slot.spec.name, "message_id": record["id"], "from": record["from"],
+            "reply_id": reply["id"], "session_id": slot.session_id, "cut": slot.last_uuid,
+            "tools": slot.turn_tools, "ts": _now(),
+        })
+
+    def _context_rules(self, caller: str, agent: str, action: str) -> Dict[str, Any]:
+        """The settings for `caller` managing `agent`'s context; raises HubError if `action` isn't allowed."""
+        target = self.agents.get(agent)
+        if target is None:
+            raise HubError(f"Unknown agent '{agent}'. Agents: {list(self.agents)}")
+        if caller == agent:
+            raise HubError("An agent can't manage its own context.")
+        if caller == USER:  # the person running the session isn't limited by 'manages'
+            rules = rules_for({agent: {"backends": list(REWIND_BACKENDS)}}, agent)
+        else:
+            slot = self.agents.get(caller)
+            if slot is None:
+                raise HubError(f"Unknown agent '{caller}'.")
+            rules = rules_for(slot.spec.manages, agent)
+            if rules is None:
+                raise HubError(f"'{caller}' isn't allowed to manage '{agent}' (no 'manages' entry for it in run.json).")
+        if action not in rules["actions"]:
+            raise HubError(f"'{action}' isn't allowed for {agent} (actions: {', '.join(rules['actions']) or 'none'}).")
+        if action == "rewind":
+            if target.spec.backend not in rules["backends"]:
+                raise HubError(f"Rewinding {target.spec.backend} agents isn't allowed for {agent} "
+                               f"(backends: {', '.join(rules['backends'])}).")
+            if target.spec.backend not in REWIND_BACKENDS:
+                raise HubError(f"Rewinding {target.spec.backend} agents isn't supported yet (only {', '.join(REWIND_BACKENDS)}).")
+        return rules
+
+    def context_turns(self, caller: str, agent: str) -> Dict[str, Any]:
+        """The turns `agent` can be rewound to, oldest first, with the start of each message and reply."""
+        self._context_rules(caller, agent, "list")
+        messages = {m["id"]: m for m in self.log.read_all()}
+
+        def preview(message_id):
+            text = (messages.get(message_id) or {}).get("text") or ""
+            line = " ".join(text.split())
+            return line if len(line) <= 160 else line[:160] + "…"
+
+        turns = [{"message_id": t["message_id"], "from": t.get("from"), "message": preview(t["message_id"]),
+                  "reply_id": t.get("reply_id"), "reply": preview(t.get("reply_id")), "tool_calls": t.get("tools", 0)}
+                 for t in self.checkpoints.turns(agent)]
+        slot = self.agents[agent]
+        return {"agent": agent, "session_id": slot.session_id, "busy": slot.busy, "turns": turns}
+
+    def rewind(self, caller: str, agent: str, after: str, note: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Rewinds `agent` to just after it answered message `after`: its conversation is
+        forked at that point and the agent restarts on the fork, under the same name.
+        The old session is kept (previous_sessions). Files on disk are not changed.
+        `note`, if given, is sent to the agent from `caller` afterwards.
+        """
+        rules = self._context_rules(caller, agent, "rewind")
+        note = (note or "").strip() or None
+        if rules["note"] == "required" and not note:
+            raise HubError(f"Rewinding {agent} needs a note saying what it learned in the turns it will lose.")
+        if rules["note"] == "off" and note:
+            raise HubError(f"Notes aren't allowed when rewinding {agent}.")
+        old = self.agents[agent]
+        if old.busy or old.inbox.qsize():
+            raise HubError(f"'{agent}' is busy; rewind it once it is idle.")
+        turns = self.checkpoints.turns(agent)
+        index = next((i for i, t in enumerate(turns) if t["message_id"] == after), None)
+        if index is None:
+            known = ", ".join(t["message_id"] for t in turns) or "none yet"
+            raise HubError(f"'{agent}' has no turn that answered {after} in its current conversation (turns: {known}).")
+        dropped = len(turns) - index - 1
+        if dropped == 0:
+            raise HubError(f"'{agent}' is already right after {after}; there is nothing to rewind.")
+        cut, old_session = turns[index]["cut"], old.session_id
+        new_session = str(uuid.uuid4())
+
+        spec = replace(old.spec, session_id=old_session, rewind={"at": cut, "session_id": new_session},
+                       previous_sessions=old.spec.previous_sessions + ([old_session] if old_session else []))
+        slot = self._new_slot(spec)
+        try:
+            self._start_pipeline(slot)
+        except Exception as e:
+            try:
+                slot.pipeline.close()
+            except Exception:
+                pass
+            raise HubError(f"Couldn't start the rewound copy of '{agent}': {e}")
+        slot.spec.session_id, slot.spec.rewind = new_session, None
+        slot.reported_model, slot.introduced = old.reported_model, old.introduced
+        slot.known_agents = set(old.known_agents)
+        slot.notice = (f"[landline] Your conversation was rewound by {caller} to just after your reply to {after}: "
+                       f"the {dropped} turn(s) after it are no longer in your memory. Files on disk were not changed, "
+                       f"so they may still contain work from those turns.\n\n")
+        with self._lock:
+            if self.agents.get(agent) is not old or old.busy or old.inbox.qsize():
+                swapped = False
+            else:
+                self.agents[agent], swapped = slot, True
+        if not swapped:
+            slot.pipeline.close()
+            raise HubError(f"'{agent}' got a message while it was being rewound; try again once it is idle.")
+        old.stopping = True
+        old.inbox.put(None)
+        try:
+            old.pipeline.close()
+        except Exception as e:
+            logger.warning(f"Error closing {agent}'s old session: {e}")
+        self._start_worker(slot)
+        self.checkpoints.append({"agent": agent, "rewound_to": after, "by": caller, "session_id": new_session,
+                                 "previous_session": old_session, "dropped": dropped, "ts": _now()})
+        self._write_run_file()
+        self._emit({"kind": "session", "agent": agent, "session_id": new_session, "model": self.model_in_use(slot)})
+        self._emit({"kind": "agent_rewound", "agent": agent, "to": after, "by": caller, "dropped": dropped,
+                    "session_id": new_session, "previous_session": old_session,
+                    "transcript": slot.pipeline.transcript_path()})
+        logger.info(f"{caller} rewound {agent} to after {after} ({dropped} turns dropped)")
+        result = {"agent": agent, "rewound_to": after, "turns_dropped": dropped, "session_id": new_session,
+                  "previous_session": old_session}
+        if note:
+            sent = self.send(caller, agent, note, wait=False)
+            result["note_id"] = sent["message"]["id"]
+        return result
 
     # ------------------------------------------------------------ inspection
 
@@ -601,7 +763,8 @@ class Hub:
             "socket": self.socket_path,
             "messages": self.log.path,
             "agents": {
-                name: {**{k: v for k, v in asdict(slot.spec).items() if k != "name"},
+                name: {**{k: v for k, v in asdict(slot.spec).items()
+                          if k not in ("name", "rewind") and not (k in ("manages", "previous_sessions") and not v)},
                        # The folder the agent actually works in, even when the config left it
                        # to the hub's folder: resuming needs it (claude finds sessions by folder).
                        "cwd": slot.spec.cwd or getattr(slot.pipeline, "cwd", None),
@@ -627,6 +790,7 @@ class Hub:
 # Local socket API: one JSON request line per connection, JSON response line(s).
 #   {"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true}
 #   {"op": "list"}
+#   {"op": "context", "from": "lead", "agent": "fixer", "action": "list" | "rewind", "after": "m7", "note": "..."}
 #   {"op": "messages"}
 #   {"op": "subscribe"}   -> streams events, one JSON line each, until disconnect
 # ---------------------------------------------------------------------------
@@ -658,7 +822,7 @@ class HubServer:
                                           wait=request.get("wait", True), timeout=request.get("timeout"))
                         self._reply({"ok": True, **result})
                     elif op == "spawn":
-                        fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id")}
+                        fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id", "manages")}
                         info = hub.spawn(AgentSpec.from_dict(request.get("name") or "", fields))
                         self._reply({"ok": True, "agent": info})
                     elif op == "stop":
@@ -669,6 +833,14 @@ class HubServer:
                         self._reply({"ok": True, "run": hub.rename(request.get("run") or "")})
                     elif op == "list":
                         self._reply({"ok": True, "run": hub.run_id, "agents": hub.list_agents()})
+                    elif op == "context":
+                        caller, agent = request.get("from") or USER, request.get("agent") or ""
+                        if request.get("action", "list") == "list":
+                            self._reply({"ok": True, **hub.context_turns(caller, agent)})
+                        elif request.get("action") == "rewind":
+                            self._reply({"ok": True, **hub.rewind(caller, agent, request.get("after") or "", request.get("note"))})
+                        else:
+                            self._reply({"ok": False, "error": f"Unknown action '{request.get('action')}': use list or rewind."})
                     elif op == "messages":
                         self._reply({"ok": True, "run": hub.run_id, "messages": hub.log.read_all()})
                     elif op == "subscribe":
@@ -758,10 +930,16 @@ class HubClient:
         return self.request({"op": "adopt", "run": run_id})
 
     def spawn(self, name: str, backend: str, model: Optional[str] = None, effort: Optional[str] = None,
-              cwd: Optional[str] = None, role: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
+              cwd: Optional[str] = None, role: Optional[str] = None, session_id: Optional[str] = None,
+              manages: Any = None) -> Dict[str, Any]:
         """Starts a new agent in the running hub (resuming `session_id` if given); returns once it is up or failed."""
         return self.request({"op": "spawn", "name": name, "backend": backend, "model": model,
-                             "effort": effort, "cwd": cwd, "role": role, "session_id": session_id})
+                             "effort": effort, "cwd": cwd, "role": role, "session_id": session_id, "manages": manages})
+
+    def context(self, sender: str, agent: str, action: str = "list", after: Optional[str] = None,
+                note: Optional[str] = None) -> Dict[str, Any]:
+        """Lists the turns `agent` can be rewound to, or rewinds it to just after message `after`."""
+        return self.request({"op": "context", "from": sender, "agent": agent, "action": action, "after": after, "note": note})
 
     def messages(self) -> Dict[str, Any]:
         return self.request({"op": "messages"})
