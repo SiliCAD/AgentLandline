@@ -88,6 +88,12 @@ landline up run.json
 
   `_new_slot` handles `fork` and `rewind` alike: it starts the pipeline on the copy, then gives the slot
   a spec with the copy's `session_id`. `find_sessions` reads every `runs/*/run.json` under the hub's home.
+- **Permissions while running**: `Hub.set_permissions(agent, manages, spawns)` (op `permissions`, user only)
+  normalizes and sets both. If the agent's tool set changes (`bool(manages)` or `bool(spawns)` flips), it
+  calls `_restart` (resume its own session) now if idle, else sets `slot.restart_pending`, and the worker
+  restarts it after the turn. Emits `agent_updated` (`info`, `restart`: now / after its turn / done).
+  `_replace_slot(old, spec, doing, notice, keep_queue)` is the shared start-new-CLI-and-swap used by rewind
+  (no queue allowed) and restart (queued deliveries move to the new slot).
 - **Images** (`images.py`): `send(..., images=[paths])` checks them (type, size), copies them to
   `runs/<run>/images/<random>-<name>`, and stores the copies' paths in the record (`images`). The worker
   passes them to ClaudePipeline.send(images=...), which adds base64 image blocks after the text
@@ -146,7 +152,7 @@ Copy the transcripts of runs worth keeping.
 
 The hub adds `agent` and `ts` to each one, and also emits `message` (a full log record), `turn_start`
 (`message_id`), `idle`, `agent_added` (`info`: the new agent's `list` entry), `agent_removed`, and
-`run_renamed` (`run`, `previous`), `agent_rewound` (`to`, `by`, `dropped`, `session_id`, `previous_session`,
+`run_renamed` (`run`, `previous`), `agent_updated` (`info`, `restart`), `agent_rewound` (`to`, `by`, `dropped`, `session_id`, `previous_session`,
 `transcript`). The `session` event
 carries `model`: the model in use (claude reports it at startup; agy's comes from its settings). Live events are not persisted.
 
@@ -173,6 +179,7 @@ One JSON request line per connection, answered with one JSON line (`subscribe` k
 {"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "...", "manages": null, "fork": false}
 {"op": "team", "from": "lead", "action": "start", "name": "fixer-2", "from_agent": "fixer", "after": "m7", "role": "..."}
 {"op": "team", "from": "lead", "action": "sessions", "query": "opamp"}
+{"op": "permissions", "from": "user", "agent": "lead", "manages": {"fixer": {}}, "spawns": {"max": 2}}
 {"op": "context", "from": "lead", "agent": "fixer", "action": "list"}
 {"op": "context", "from": "lead", "agent": "fixer", "action": "rewind", "after": "m7", "note": "..."}
 {"op": "subscribe"}
