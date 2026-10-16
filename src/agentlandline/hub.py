@@ -183,6 +183,7 @@ class _AgentSlot:
         self.last_uuid: Optional[str] = None  # claude: the last assistant message of the running turn
         self.turn_tools = 0                   # tool calls in the running turn
         self.notice: Optional[str] = None     # put in front of the next message delivered to it
+        self.restart_pending = False          # restart its CLI once the running turn ends (new tools)
         # Started on an existing conversation (resumed or forked), so it already knows things.
         self.has_history = bool(spec.session_id or spec.forked_from)
 
@@ -603,6 +604,14 @@ class Hub:
                 slot.busy, slot.current_trigger = False, None
                 self._emit({"kind": "idle", "agent": slot.spec.name})
                 delivery.done.set()
+            if slot.restart_pending and not slot.stopping:
+                try:  # its tools changed during the turn: restart now, on this worker's way out
+                    self._restart(slot.spec.name)
+                    self._write_run_file()
+                    self._emit({"kind": "agent_updated", "agent": slot.spec.name,
+                                "info": self._agent_info(self.agents[slot.spec.name]), "restart": "done"})
+                except Exception as e:
+                    logger.error(f"Couldn't restart {slot.spec.name} for its new permissions: {e}")
 
     @staticmethod
     def _describe(slot: _AgentSlot) -> str:
@@ -728,36 +737,10 @@ class Hub:
 
         spec = replace(old.spec, session_id=old_session, rewind={"at": cut, "session_id": new_session},
                        previous_sessions=old.spec.previous_sessions + ([old_session] if old_session else []))
-        slot = self._new_slot(spec)
-        try:
-            self._start_pipeline(slot)
-        except Exception as e:
-            try:
-                slot.pipeline.close()
-            except Exception:
-                pass
-            raise HubError(f"Couldn't start the rewound copy of '{agent}': {e}")
-        slot.spec.session_id, slot.spec.rewind = new_session, None
-        slot.reported_model, slot.introduced = old.reported_model, old.introduced
-        slot.known_agents = set(old.known_agents)
-        slot.notice = (f"[landline] Your conversation was rewound by {caller} to just after your reply to {after}: "
-                       f"the {dropped} turn(s) after it are no longer in your memory. Files on disk were not changed, "
-                       f"so they may still contain work from those turns.\n\n")
-        with self._lock:
-            if self.agents.get(agent) is not old or old.busy or old.inbox.qsize():
-                swapped = False
-            else:
-                self.agents[agent], swapped = slot, True
-        if not swapped:
-            slot.pipeline.close()
-            raise HubError(f"'{agent}' got a message while it was being rewound; try again once it is idle.")
-        old.stopping = True
-        old.inbox.put(None)
-        try:
-            old.pipeline.close()
-        except Exception as e:
-            logger.warning(f"Error closing {agent}'s old session: {e}")
-        self._start_worker(slot)
+        notice = (f"[landline] Your conversation was rewound by {caller} to just after your reply to {after}: "
+                  f"the {dropped} turn(s) after it are no longer in your memory. Files on disk were not changed, "
+                  f"so they may still contain work from those turns.\n\n")
+        slot = self._replace_slot(old, spec, "rewound", notice=notice)
         self.checkpoints.append({"agent": agent, "rewound_to": after, "by": caller, "session_id": new_session,
                                  "previous_session": old_session, "dropped": dropped, "ts": _now()})
         self._write_run_file()
@@ -772,6 +755,93 @@ class Hub:
             sent = self.send(caller, agent, note, wait=False)
             result["note_id"] = sent["message"]["id"]
         return result
+
+    def _replace_slot(self, old: _AgentSlot, spec: AgentSpec, doing: str, notice: Optional[str] = None,
+                      keep_queue: bool = False) -> _AgentSlot:
+        """
+        Starts a new CLI for agent `old` from `spec` and swaps it in under the same name: it takes
+        over the old one's state (model, introductions); the old CLI is closed. The agent must be
+        idle. With keep_queue, messages waiting for it move to the new one; otherwise a waiting
+        message aborts the swap. `doing` names the action for errors ('rewound', 'restarted').
+        """
+        agent = old.spec.name
+        slot = self._new_slot(spec)
+        try:
+            self._start_pipeline(slot)
+        except Exception as e:
+            try:
+                slot.pipeline.close()
+            except Exception:
+                pass
+            raise HubError(f"Couldn't start '{agent}' {doing}: {e}")
+        slot.reported_model, slot.introduced = old.reported_model, old.introduced
+        slot.known_agents = set(old.known_agents)
+        slot.notice = notice
+        with self._lock:
+            swapped = self.agents.get(agent) is old and not old.busy and (keep_queue or not old.inbox.qsize())
+            if swapped:
+                self.agents[agent] = slot
+                old.stopping = True
+        if not swapped:
+            slot.pipeline.close()
+            raise HubError(f"'{agent}' got a message while it was being {doing}; try again once it is idle.")
+        while keep_queue:  # messages that were waiting for the old CLI
+            try:
+                delivery = old.inbox.get_nowait()
+            except queue.Empty:
+                break
+            if delivery is not None:
+                slot.inbox.put(delivery)
+        old.inbox.put(None)
+        try:
+            old.pipeline.close()
+        except Exception as e:
+            logger.warning(f"Error closing {agent}'s old session: {e}")
+        self._start_worker(slot)
+        return slot
+
+    # --------------------------------------------------------- permissions
+
+    def set_permissions(self, agent: str, manages: Any = None, spawns: Any = None) -> Dict[str, Any]:
+        """
+        Replaces `agent`'s `manages` and `spawns` settings while it runs; they take effect at once
+        and are saved in run.json. Its CLI only learns about added or removed tools when it starts,
+        so if the set of tools changes, the agent is restarted on its own conversation: now if it
+        is idle, else right after its current turn. Returns its list entry and when it restarts.
+        """
+        slot = self.agents.get(agent)
+        if slot is None:
+            raise HubError(f"Unknown agent '{agent}'. Agents: {list(self.agents)}")
+        try:
+            new_manages, new_spawns = normalize_manages(manages), normalize_spawns(spawns)
+        except ContextError as e:
+            raise HubError(f"Agent '{agent}': {e}")
+        if new_manages and agent in new_manages:
+            raise HubError("An agent can't manage its own context.")
+        tools_change = (bool(slot.spec.manages), bool(slot.spec.spawns)) != (bool(new_manages), bool(new_spawns))
+        slot.spec.manages, slot.spec.spawns = new_manages, new_spawns
+        restart = None
+        if tools_change:
+            restart = "after its turn" if slot.busy else "now"
+            if slot.busy:
+                slot.restart_pending = True
+            else:
+                slot = self._restart(agent)
+        self._write_run_file()
+        info = self._agent_info(slot)
+        self._emit({"kind": "agent_updated", "agent": agent, "info": info, "restart": restart})
+        logger.info(f"Permissions of {agent} set (manages={new_manages}, spawns={new_spawns}, restart={restart})")
+        return {"agent": info, "restart": restart}
+
+    def _restart(self, agent: str) -> _AgentSlot:
+        """Restarts `agent`'s CLI on its own conversation (so it gets the tools its settings give it)."""
+        old = self.agents[agent]
+        old.restart_pending = False
+        spec = replace(old.spec, session_id=old.session_id or old.spec.session_id)
+        slot = self._replace_slot(old, spec, "restarted", keep_queue=True)
+        if slot.session_id:
+            self._emit({"kind": "session", "agent": agent, "session_id": slot.session_id, "model": self.model_in_use(slot)})
+        return slot
 
     # ------------------------------------------------- agents starting agents
 
@@ -929,6 +999,8 @@ class Hub:
             "transcript": slot.pipeline.transcript_path(),
             "spawned_by": slot.spec.spawned_by,
             "forked_from": slot.spec.forked_from,
+            "manages": slot.spec.manages,
+            "spawns": slot.spec.spawns,
             "busy": slot.busy,
             "queued": slot.inbox.qsize(),
         }
@@ -981,6 +1053,7 @@ class Hub:
 #   {"op": "list"}
 #   {"op": "context", "from": "lead", "agent": "fixer", "action": "list" | "rewind", "after": "m7", "note": "..."}
 #   {"op": "team", "from": "lead", "action": "start" | "stop" | "sessions", "name": "fixer-2", ...}
+#   {"op": "permissions", "agent": "lead", "manages": {...} | null, "spawns": {...} | true | null}   (user only)
 #   {"op": "messages"}
 #   {"op": "subscribe"}   -> streams events, one JSON line each, until disconnect
 # ---------------------------------------------------------------------------
@@ -1025,6 +1098,12 @@ class HubServer:
                         self._reply({"ok": True, "run": hub.rename(request.get("run") or "")})
                     elif op == "list":
                         self._reply({"ok": True, "run": hub.run_id, "agents": hub.list_agents()})
+                    elif op == "permissions":
+                        if (request.get("from") or USER) != USER:
+                            self._reply({"ok": False, "error": "Only the user can change permissions."})
+                        else:
+                            self._reply({"ok": True, **hub.set_permissions(request.get("agent") or "", request.get("manages"),
+                                                                            request.get("spawns"))})
                     elif op == "team":
                         caller, action = request.get("from") or USER, request.get("action")
                         if action == "start":
@@ -1150,6 +1229,10 @@ class HubClient:
         return self.request({"op": "spawn", "name": name, "backend": backend, "model": model, "effort": effort,
                              "cwd": cwd, "role": role, "session_id": session_id, "manages": manages, "fork": fork,
                              "spawns": spawns})
+
+    def set_permissions(self, agent: str, manages: Any = None, spawns: Any = None) -> Dict[str, Any]:
+        """Replaces an agent's `manages` and `spawns` settings (see Hub.set_permissions)."""
+        return self.request({"op": "permissions", "from": USER, "agent": agent, "manages": manages, "spawns": spawns})
 
     def team(self, sender: str, action: str, **fields) -> Dict[str, Any]:
         """Agents starting agents: action 'start' (name, backend, ..., from_agent, after), 'stop' (name) or 'sessions' (query)."""
