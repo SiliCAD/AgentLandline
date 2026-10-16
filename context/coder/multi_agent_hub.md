@@ -88,7 +88,7 @@ landline up run.json
 
   `_new_slot` handles `fork` and `rewind` alike: it starts the pipeline on the copy, then gives the slot
   a spec with the copy's `session_id`. `find_sessions` reads every `runs/*/run.json` under the hub's home.
- `send(..., images=[paths])` checks them (type, size), copies them to
+- **Images** (`images.py`): `send(..., images=[paths])` checks them (type, size), copies them to
   `runs/<run>/images/<random>-<name>`, and stores the copies' paths in the record (`images`). The worker
   passes them to ClaudePipeline.send(images=...), which adds base64 image blocks after the text
   (≤ 5 MB each). agy's stream-json input refuses non-text blocks ("only text"), so `_frame` appends the
