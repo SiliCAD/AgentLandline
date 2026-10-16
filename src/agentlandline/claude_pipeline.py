@@ -66,6 +66,8 @@ class ClaudePipeline:
         conversation_id: Optional[str] = None,
         permission_mode: Optional[str] = None,
         fork_session: bool = False,
+        fork_session_id: Optional[str] = None,
+        resume_at: Optional[str] = None,
         extra_args: Optional[List[str]] = None,
         extra_env: Optional[Dict[str, str]] = None,
         stream_partial: bool = False,
@@ -78,6 +80,11 @@ class ClaudePipeline:
         # When resuming (`conversation_id` set), fork_session asks Claude Code to mint a new
         # session id instead of continuing the original one (`--resume <id> --fork-session`).
         self.fork_session = fork_session
+        # Optional extras for a fork: the new session's id, chosen up front
+        # (`--session-id`), and the assistant message uuid to cut the copied history
+        # after (`--resume-session-at`), so the fork continues from that message.
+        self.fork_session_id = fork_session_id
+        self.resume_at = resume_at
         self.extra_args = extra_args or []
         # Variables the caller explicitly hands to the child, layered on top of the
         # allowlisted environment (see _build_env); nothing is inherited implicitly.
@@ -87,7 +94,7 @@ class ClaudePipeline:
         self.stream_partial = stream_partial
 
         self.proc: Optional[subprocess.Popen] = None
-        self.conversation_id: Optional[str] = conversation_id
+        self.conversation_id: Optional[str] = (fork_session_id if fork_session else None) or conversation_id
         self.available_tools: List[str] = []
         # Set from the constructor as the requested mode, then overwritten with the CLI's
         # actual reported mode once the init event arrives (mirrors AgyPipeline.permission_mode).
@@ -148,6 +155,10 @@ class ClaudePipeline:
             cmd.extend(["--resume", self.resume_conversation_id])
             if self.fork_session:
                 cmd.append("--fork-session")
+                if self.fork_session_id:
+                    cmd.extend(["--session-id", self.fork_session_id])
+            if self.resume_at:
+                cmd.extend(["--resume-session-at", self.resume_at])
         if self.extra_args:
             cmd.extend(self.extra_args)
         return cmd

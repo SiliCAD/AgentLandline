@@ -109,6 +109,7 @@ Add **AgentLandline** to your MCP client configuration file (e.g., `~/.gemini/an
 | `report_issue` | `title` *(str)*<br>`body` *(str)*<br>`label` *(str)*<br>`repo` *(str, default: 'SiliCAD/AgentLandline')*<br>`agent_model` *(str)*<br>`session_id` *(str)* | Creates a GitHub issue in the target repository (default: `SiliCAD/AgentLandline`) with formatted metadata, smart typography/typo label matching (`new_lable` <-> `new lable`), and auto-creation of missing labels with random colors. |
 | `message_agent` *(hub mode)* | `to` *(str)*<br>`text` *(str)*<br>`wait` *(bool, default: true)* | Only in agents started by `landline up`. Sends a message to another agent (or `'user'`) through the hub and, with `wait`, returns its reply. |
 | `list_agents` *(hub mode)* | *None* | Only in agents started by `landline up`. Lists the other agents with their roles and busy state. |
+| `manage_context` *(hub mode)* | `agent` *(str)*<br>`action` *(str: 'list' or 'rewind')*<br>`after` *(str, message id)*<br>`note` *(str, optional)* | Only in agents with a `manages` setting. `list` shows another agent's turns; `rewind` cuts its conversation back to just after its reply to message `after`. See [Managing another agent's context](#managing-another-agents-context). |
 
 ---
 
@@ -134,6 +135,7 @@ Per agent: `backend` (`claude`/`agy`, required), and optionally:
 - `cwd`: the folder it works in (default: the folder you run `landline up` from).
 - `model`, `effort`: passed to the CLI (default: the CLI's own).
 - `session_id`: resume an existing CLI session instead of starting a new one.
+- `manages`: the agents whose context this agent may manage (see below).
 
 At the top level, `run` names the run (default: a timestamp).
 
@@ -166,6 +168,43 @@ next message.
 queued for it fail with "stopped", and the other agents are told it left. It stays in the run's `run.json`
 marked `"stopped": true`, so resuming the session brings it back. `landline rename <name>` renames the
 running session: its folder under `runs/` moves to the new name, which then identifies it everywhere.
+
+**Managing another agent's context.** An agent with a `manages` setting gets one more MCP tool,
+`manage_context`. With it, a lead can list another agent's turns and rewind that agent to just after one
+of its replies. The rewound agent keeps its name and continues on a copy of its conversation cut at that
+point, so it carries less context and its turns are faster.
+
+```json
+"lead":  {"backend": "claude", "role": "…", "manages": ["fixer"]},
+"fixer": {"backend": "claude", "role": "…"}
+```
+
+`manages` lists agent names, or sets each one's rules (`"*"` covers agents not named):
+
+```json
+"manages": {"fixer": {"actions": ["list", "rewind"], "note": "required"}, "*": {"actions": ["list"]}}
+```
+
+| Setting | Values | Default |
+| :--- | :--- | :--- |
+| `actions` | `list`, `rewind` | both |
+| `note` | `optional`, `required`, `off`: whether the lead must (or may) tell the agent what it learned in the turns it loses | `optional` |
+| `backends` | `claude`, `agy` | `["claude"]` |
+| `cut` | `turn`: cut only at the end of a turn | `turn` |
+| `files` | `keep`: files on disk are left as they are | `keep` |
+
+- **What a rewind does.** The agent's claude session is forked at its reply to the chosen message
+  (`--resume --fork-session --resume-session-at`), and the agent restarts on the fork. The old session id
+  is kept in run.json under `previous_sessions`, and nothing is deleted. The agent's next message starts
+  by telling it that it was rewound, and that files on disk weren't changed.
+- **Files are not rewound.** Anything the agent wrote after the cut is still on disk. Use `note` to say
+  what was tried and why it failed, so the agent doesn't repeat it.
+- **Not supported yet:** agy agents (their conversations can be cut, but only by editing agy's private
+  database), cuts inside a turn (`cut: step`), and restoring files (`files: snapshot`). A config that asks
+  for one of these is refused when it's loaded.
+- An agent can't be rewound while it is busy or has messages waiting. The person running the session
+  can rewind any claude agent over the socket (`{"op": "context", "from": "user", …}`); they aren't
+  limited by `manages`.
 
 **Restarting a team.** The run's `run.json` lists every agent, including spawned ones, with their session
 ids, and is itself a valid config: `landline up ~/.agentlandline/runs/<run>/run.json` brings the whole team

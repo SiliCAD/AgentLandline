@@ -57,6 +57,26 @@ landline up run.json
   saved run instead: the log moves to that run (numbering continues), its agents stay in run.json as saved
   (`_dormant`) until spawned again, the empty run the hub started with is removed, and viewers get
   `run_switched`. This is how a viewer resumes a session into a fresh hub without losing its history.
+- **Context management** (`context.py`): an agent's `manages` setting (normalized to `{agent: rules}`,
+  validated when the config is loaded) lets it list and rewind other agents, through op `context` and
+  the `manage_context` MCP tool. The tool is registered only when the hub sets `LANDLINE_MANAGES`.
+  - **Checkpoints**: when a claude agent finishes a turn successfully, the hub appends
+    `{agent, message_id, from, reply_id, session_id, cut, tools}` to `runs/<run>/checkpoints.jsonl`.
+    `cut` is the `uuid` of the turn's last `assistant` stream event, and `tools` counts its `tool_start`
+    events.
+  - **Rewinding**: `Hub.rewind(caller, agent, after, note)` checks the rules, then starts a new slot with
+    `spec.rewind = {at: cut, session_id: <new uuid>}`. That makes ClaudePipeline run
+    `--resume <old> --fork-session --session-id <new> --resume-session-at <cut>`, so the fork's id is
+    known before its first turn. Under the lock it swaps the slot in (or aborts if a message arrived
+    meanwhile), closes the old pipeline, and appends `{agent, rewound_to, session_id, previous_session}`
+    to checkpoints.jsonl. Folding the file drops the turns after a rewind point. The new slot's `notice`
+    goes in front of its next message. The old session id goes into `spec.previous_sessions` (saved in
+    run.json; `rewind` itself never is). Emits `session`, then `agent_rewound`. `note` is sent from the
+    caller with `wait=False`.
+  - Fork-at-message was checked live against claude 2.1.299: the fork keeps the message uuids up to
+    the cut, and the original session file is unchanged. agy isn't supported (REWIND_BACKENDS); its
+    conversations can be cut by deleting `steps` rows from a copy of its SQLite file, but that format is
+    private.
 - Sending to `'user'` only records the message, since there is no inbox to deliver it to.
 - **Wait-cycle guard**: the hub tracks which agent is waiting on which. If A is waiting on B and B
   tries to wait on A (directly or through a longer chain), B gets a `HubError` explaining the
@@ -104,7 +124,8 @@ Copy the transcripts of runs worth keeping.
 
 The hub adds `agent` and `ts` to each one, and also emits `message` (a full log record), `turn_start`
 (`message_id`), `idle`, `agent_added` (`info`: the new agent's `list` entry), `agent_removed`, and
-`run_renamed` (`run`, `previous`). The `session` event
+`run_renamed` (`run`, `previous`), `agent_rewound` (`to`, `by`, `dropped`, `session_id`, `previous_session`,
+`transcript`). The `session` event
 carries `model`: the model in use (claude reports it at startup; agy's comes from its settings). Live events are not persisted.
 
 **Reasoning visibility (verified against claude 2.1.x and agy 1.3.x):**
@@ -127,7 +148,9 @@ One JSON request line per connection, answered with one JSON line (`subscribe` k
 {"op": "stop", "name": "reviewer"}
 {"op": "rename", "run": "opamp-review"}
 {"op": "adopt", "run": "run-20261012-022025-7b62"}
-{"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "..."}
+{"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "...", "manages": null}
+{"op": "context", "from": "lead", "agent": "fixer", "action": "list"}
+{"op": "context", "from": "lead", "agent": "fixer", "action": "rewind", "after": "m7", "note": "..."}
 {"op": "subscribe"}
 ```
 
