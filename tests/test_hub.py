@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -506,3 +507,222 @@ def test_run_file_records_the_folder_each_agent_works_in(short_dir):
         assert reloaded["a"].cwd == "/Users/someone/project"
     finally:
         hub.stop()
+
+
+# --- stopping single agents and renaming the session --------------------------
+
+class GatedPipeline(FakePipeline):
+    """send() blocks until released, like an agent in the middle of a long turn."""
+
+    def __init__(self, spec, env, behaviour=None):
+        super().__init__(spec, env, behaviour)
+        self.release = threading.Event()
+        self.entered = threading.Event()
+
+    def send(self, prompt, timeout=None):
+        self.entered.set()
+        self.release.wait(5)
+        return super().send(prompt, timeout)
+
+    def close(self):
+        self.release.set()  # closing the CLI ends the turn
+
+
+def test_stop_agent_removes_it_but_keeps_it_resumable(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={"role": "lead"}, b={"role": "helper"})
+    seen = []
+    hub.subscribe(seen.append)
+    try:
+        info = hub.stop_agent("b")
+        assert info["name"] == "b"
+        assert [a["name"] for a in hub.list_agents()] == ["a"]
+        assert {"kind": "agent_removed", "agent": "b"}.items() <= seen[-1].items()
+        run_file = os.path.join(short_dir, "runs", "test-run", "run.json")
+        data = json.load(open(run_file))
+        assert data["agents"]["b"]["stopped"] is True and "stopped" not in data["agents"]["a"]
+        assert {s.name for s in load_config(run_file)["agents"]} == {"a", "b"}  # resume brings it back
+        with pytest.raises(HubError, match="Unknown agent 'b'"):
+            hub.send("user", "b", "hi")
+        with pytest.raises(HubError, match="Unknown agent 'zz'"):
+            hub.stop_agent("zz")
+    finally:
+        hub.stop()
+
+
+def test_stopping_a_busy_agent_fails_its_messages_without_fake_replies(short_dir):
+    pipelines = {}
+
+    def factory(spec, env):
+        pipelines[spec.name] = (GatedPipeline if spec.name == "b" else FakePipeline)(spec, env)
+        return pipelines[spec.name]
+    hub = Hub([AgentSpec("a"), AgentSpec("b")], run_id="busy", home=short_dir,
+              socket_path=os.path.join(short_dir, "b.sock"), pipeline_factory=factory)
+    hub.start()
+    results = {}
+    try:
+        first = threading.Thread(target=lambda: results.setdefault("first", hub.send("user", "b", "long job")))
+        first.start()
+        assert pipelines["b"].entered.wait(5)  # b is mid-turn
+        second = threading.Thread(target=lambda: results.setdefault("second", hub.send("a", "b", "queued")))
+        second.start()
+        time.sleep(0.2)
+        hub.stop_agent("b")
+        first.join(5)
+        second.join(5)
+        assert results["first"]["status"] == "ERROR" and "stopped before replying" in results["first"]["error"]
+        assert results["second"]["status"] == "ERROR" and "was stopped" in results["second"]["error"]
+        assert [m["from"] for m in hub.log.read_all()] == ["user", "a"]  # no reply from b was invented
+    finally:
+        hub.stop()
+
+
+def test_agents_are_told_who_left_and_names_can_be_reused(short_dir):
+    hub, pipelines = make_hub(short_dir, {}, a={}, b={})
+    try:
+        hub.send("user", "a", "first")
+        hub.stop_agent("b")
+        hub.send("user", "a", "second")
+        assert pipelines["a"].prompts[1].startswith("Agents that have left the session: b\n")
+        hub.spawn(AgentSpec("b", role="back again"))
+        assert hub.send("user", "b", "hi")["status"] == "REPLIED"
+        data = json.load(open(os.path.join(short_dir, "runs", "test-run", "run.json")))
+        assert "stopped" not in data["agents"]["b"]
+    finally:
+        hub.stop()
+
+
+def test_rename_moves_the_session_and_logging_continues(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    seen = []
+    hub.subscribe(seen.append)
+    try:
+        hub.send("user", "a", "before")
+        assert hub.rename("opamp-review") == "opamp-review"
+        runs = os.path.join(short_dir, "runs")
+        assert not os.path.exists(os.path.join(runs, "test-run"))
+        hub.send("user", "a", "after")
+        texts = [m["text"] for m in MessageLogReader(os.path.join(runs, "opamp-review"))]
+        assert texts == ["before", "a got it", "after", "a got it"]
+        data = json.load(open(os.path.join(runs, "opamp-review", "run.json")))
+        assert data["run"] == "opamp-review" and data["messages"].endswith("opamp-review/messages.jsonl")
+        renamed = [e for e in seen if e["kind"] == "run_renamed"]
+        assert len(renamed) == 1 and renamed[0]["run"] == "opamp-review" and renamed[0]["previous"] == "test-run"
+        assert hub.rename("opamp-review") == "opamp-review"  # same name: nothing to do
+        os.makedirs(os.path.join(runs, "taken"))
+        with pytest.raises(HubError, match="already exists"):
+            hub.rename("taken")
+        with pytest.raises(HubError, match="Invalid session name"):
+            hub.rename("has spaces")
+    finally:
+        hub.stop()
+
+
+def MessageLogReader(run_dir):
+    from agentlandline.message_log import MessageLog
+    return MessageLog(run_dir).read_all()
+
+
+def test_stop_and_rename_over_the_socket(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        client = HubClient(hub.socket_path)
+        assert client.stop_agent("b")["ok"]
+        assert "Unknown agent" in client.stop_agent("b")["error"]
+        assert client.rename("my-session") == {"ok": True, "run": "my-session"}
+        assert client.list_agents()["run"] == "my-session"
+    finally:
+        server.stop()
+        hub.stop()
+
+
+def test_all_is_reserved_like_user(tmp_path):
+    for name in ("all", "All", "user"):
+        with pytest.raises(HubError, match="Invalid agent name"):
+            AgentSpec.from_dict(name, {"backend": "claude"})
+    cfg = tmp_path / "run.json"
+    cfg.write_text(json.dumps({"agents": {"all": {}}}))
+    with pytest.raises(HubError, match="reserved"):
+        load_config(str(cfg))
+
+
+# --- continuing a saved run -------------------------------------------------
+
+def _saved_run(home, run_id, agents, messages):
+    run_dir = os.path.join(home, "runs", run_id)
+    os.makedirs(run_dir)
+    with open(os.path.join(run_dir, "run.json"), "w") as f:
+        json.dump({"run": run_id, "started": "2026-10-01T00:00:00Z", "agents": agents}, f)
+    from agentlandline.message_log import MessageLog
+    log = MessageLog(run_dir)
+    for text in messages:
+        log.append("user", next(iter(agents)), text)
+
+
+def test_adopt_continues_a_saved_run(short_dir):
+    _saved_run(short_dir, "old-session", {"a": {"backend": "claude", "session_id": "s-a"},
+                                          "z": {"backend": "agy", "session_id": "s-z", "role": "helper"}}, ["one", "two"])
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    seen = []
+    hub.subscribe(seen.append)
+    try:
+        fresh_dir = hub.run_dir
+        assert hub.adopt("old-session") == "old-session"
+        assert hub.run_id == "old-session" and not os.path.exists(fresh_dir)  # empty fresh run removed
+        hub.send("user", "a", "three")
+        assert [m["id"] for m in hub.log.read_all()] == ["m1", "m2", "m3", "m4"]  # numbering continues
+        data = json.load(open(os.path.join(short_dir, "runs", "old-session", "run.json")))
+        assert data["started"] == "2026-10-01T00:00:00Z"
+        assert data["agents"]["z"]["role"] == "helper"  # not running yet, still listed
+        hub.spawn(AgentSpec("z", backend="claude"))
+        data = json.load(open(os.path.join(short_dir, "runs", "old-session", "run.json")))
+        assert data["agents"]["z"]["backend"] == "claude"  # the running agent's entry now
+        assert [e for e in seen if e["kind"] == "run_switched"][0]["previous"] == "test-run"
+    finally:
+        hub.stop()
+
+
+def test_adopt_refuses_when_the_current_run_has_messages_or_the_run_is_unknown(short_dir):
+    _saved_run(short_dir, "old-session", {"a": {"backend": "claude"}}, ["one"])
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    try:
+        with pytest.raises(HubError, match="No saved session 'nope'"):
+            hub.adopt("nope")
+        hub.send("user", "a", "hi")
+        with pytest.raises(HubError, match="already has messages"):
+            hub.adopt("old-session")
+        assert hub.run_id == "test-run"
+    finally:
+        hub.stop()
+
+
+def test_adopt_over_the_socket(short_dir):
+    _saved_run(short_dir, "old-session", {"a": {"backend": "claude"}}, [])
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        assert HubClient(hub.socket_path).adopt("old-session") == {"ok": True, "run": "old-session"}
+        assert HubClient(hub.socket_path).list_agents()["run"] == "old-session"
+    finally:
+        server.stop()
+        hub.stop()
+
+
+def test_default_socket_is_per_folder(tmp_path, monkeypatch):
+    from agentlandline.hub import default_socket_path
+    monkeypatch.delenv("LANDLINE_SOCKET", raising=False)
+    monkeypatch.setenv("LANDLINE_HOME", str(tmp_path / "home"))
+    a, b = tmp_path / "opamp", tmp_path / "bandgap"
+    a.mkdir()
+    b.mkdir()
+    sock_a, sock_b = default_socket_path(str(a)), default_socket_path(str(b))
+    assert sock_a != sock_b
+    assert os.path.dirname(sock_a) == str(tmp_path / "home" / "hubs")
+    assert os.path.basename(sock_a).startswith("opamp-") and sock_a.endswith(".sock")
+    assert default_socket_path(str(a / ".")) == sock_a  # same folder, same hub
+    monkeypatch.chdir(a)
+    assert default_socket_path() == sock_a
+    monkeypatch.setenv("LANDLINE_SOCKET", "/tmp/explicit.sock")
+    assert default_socket_path(str(b)) == "/tmp/explicit.sock"

@@ -111,3 +111,20 @@ def test_landline_up_without_config_starts_an_empty_hub(short_dir):  # noqa: F81
         proc.send_signal(2)
         out = proc.communicate(timeout=15)[0]
     assert "is up with no agents yet" in out and proc.returncode == 0
+
+
+def test_stop_and_rename_commands(short_dir, capsys):  # noqa: F811
+    hub, _ = make_hub(short_dir, {}, a={}, b={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        sock = ["--socket", hub.socket_path]
+        assert main(sock + ["stop", "b"]) == 0
+        assert "Stopped b." in capsys.readouterr().out
+        assert main(sock + ["rename", "opamp-review"]) == 0
+        assert "renamed to opamp-review" in capsys.readouterr().out
+        assert main(sock + ["rename", "bad name"]) == 1
+        assert "Invalid session name" in capsys.readouterr().err
+    finally:
+        server.stop()
+        hub.stop()
