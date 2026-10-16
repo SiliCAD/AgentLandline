@@ -7,7 +7,8 @@ One JSON object per line in `<run_dir>/messages.jsonl`:
      "caused_by": "m2",
      "from_session": "<sender's CLI session id>",
      "from_transcript": "<path to the sender's CLI transcript>",
-     "from_transcript_line": 412}
+     "from_transcript_line": 412,
+     "images": ["<run_dir>/images/1a2b3c4d-plot.png"]}   (only when it has images)
 
 Conversation history is not copied. Each record links to the sender's own CLI
 transcript, and `from_transcript_line` is that transcript's line count when the
@@ -53,6 +54,7 @@ class MessageLog:
         caused_by: Optional[str] = None,
         from_session: Optional[str] = None,
         from_transcript: Optional[str] = None,
+        images: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Writes one message record and returns it."""
         with self._lock:
@@ -67,6 +69,8 @@ class MessageLog:
                 "from_transcript": from_transcript,
                 "from_transcript_line": count_lines(from_transcript),
             }
+            if images:
+                record["images"] = list(images)
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             self._next += 1
