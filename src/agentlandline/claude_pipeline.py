@@ -21,6 +21,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable
 
+try:
+    from .images import claude_blocks
+except ImportError:  # run as a script (python claude_pipeline.py)
+    from images import claude_blocks
+
 logger = logging.getLogger("ClaudePipeline")
 
 # Claude Code surfaces "ask the user" turns as a built-in tool call rather than
@@ -412,7 +417,7 @@ class ClaudePipeline:
 
         return questions
 
-    def send(self, prompt: str, timeout: float = 120.0) -> AgentTurnResult:
+    def send(self, prompt: str, timeout: float = 120.0, images: Optional[List[str]] = None) -> AgentTurnResult:
         """
         Sends a user prompt to the agent and waits for the turn to complete.
         Maintains conversational context across calls.
@@ -433,11 +438,14 @@ class ClaudePipeline:
                 status="UNKNOWN"
             )
 
+            # Images go in as content blocks after the text (agentlandline.images).
+            blocks = claude_blocks(images or [])
+            content: Any = [{"type": "text", "text": prompt}] + blocks if blocks else prompt
             payload = {
                 "type": "user",
                 "message": {
                     "role": "user",
-                    "content": prompt
+                    "content": content
                 }
             }
 

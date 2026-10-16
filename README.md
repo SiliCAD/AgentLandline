@@ -107,7 +107,7 @@ Add **AgentLandline** to your MCP client configuration file (e.g., `~/.gemini/an
 | `agent_status` | `mode` *(str, default: 'process')* | Queries status. Modes: `process` (PID, health & active backend), `output` (live output buffer), `transcript` (last turn transcript). |
 | `exit_agent` | *None* | Gracefully terminates and cleans up the current agent process. |
 | `report_issue` | `title` *(str)*<br>`body` *(str)*<br>`label` *(str)*<br>`repo` *(str, default: 'SiliCAD/AgentLandline')*<br>`agent_model` *(str)*<br>`session_id` *(str)* | Creates a GitHub issue in the target repository (default: `SiliCAD/AgentLandline`) with formatted metadata, smart typography/typo label matching (`new_lable` <-> `new lable`), and auto-creation of missing labels with random colors. |
-| `message_agent` *(hub mode)* | `to` *(str)*<br>`text` *(str)*<br>`wait` *(bool, default: true)* | Only in agents started by `landline up`. Sends a message to another agent (or `'user'`) through the hub and, with `wait`, returns its reply. |
+| `message_agent` *(hub mode)* | `to` *(str)*<br>`text` *(str)*<br>`wait` *(bool, default: true)*<br>`images` *(list of paths, optional)* | Only in agents started by `landline up`. Sends a message to another agent (or `'user'`) through the hub and, with `wait`, returns its reply. `images` attaches image files (see [Images](#images)). |
 | `list_agents` *(hub mode)* | *None* | Only in agents started by `landline up`. Lists the other agents with their roles and busy state. |
 | `manage_context` *(hub mode)* | `agent` *(str)*<br>`action` *(str: 'list' or 'rewind')*<br>`after` *(str, message id)*<br>`note` *(str, optional)* | Only in agents with a `manages` setting. `list` shows another agent's turns; `rewind` cuts its conversation back to just after its reply to message `after`. See [Managing another agent's context](#managing-another-agents-context). |
 
@@ -133,8 +133,19 @@ Per agent: `backend` (`claude`/`agy`, required), and optionally:
 
 - `role`: what the agent is for. Each agent is told its own role and the other agents' roles, so it knows whom to ask.
 - `cwd`: the folder it works in (default: the folder you run `landline up` from).
-- `model`, `effort`: passed to the CLI (default: the CLI's own).
+- `model`, `effort`: passed to the CLI (default: the CLI's own). Each agent can have its own, and one team
+  can mix them (checked live with claude haiku/low, sonnet/high and opus/medium, and agy Gemini 3.8 Flash
+  low and high, and Claude Sonnet 4.6 in agy). agy is strict about the pair: `gemini-3.8-flash` takes
+  `--effort low|medium|high`; names with the level built in (`gemini-3.8-flash-low`) take no other effort;
+  its Claude models (`claude-sonnet-4-6`, `claude-opus-4-6-thinking`) take no effort at all. A pair agy
+  rejects fails the agent's start with agy's own message. `agy models` lists the names.
 - `session_id`: resume an existing CLI session instead of starting a new one.
+- `fork`: with `session_id`, start on a copy of that session instead of continuing it. The agent begins
+  with everything that session knew, without spending tokens or a first prompt to rebuild that context,
+  and the original session stays as it is, so the same base can seed every run of a team. The copy's id
+  replaces `session_id` in the run's `run.json` (with `forked_from` naming the original), so resuming
+  the run continues the copy. claude forks with `--resume <id> --fork-session`; agy has no fork option,
+  so the hub copies the conversation's files.
 - `manages`: the agents whose context this agent may manage (see below).
 
 At the top level, `run` names the run (default: a timestamp).
@@ -150,6 +161,8 @@ landline up run.json
 ```bash
 landline send planner "Write a small script that prints the first 10 prime numbers, get it reviewed, and tell me the result"
 landline spawn claude reviewer --model sonnet --role "Reviews the coder's changes"   # add an agent
+landline spawn claude fixer --session <session id> --fork   # start on a copy of an existing session
+landline send coder "What does this show?" --image plot.png   # attach an image
 landline stop reviewer           # stop one agent (resuming the session brings it back)
 landline rename opamp-review     # give the session a memorable name
 landline ls          # agents, busy/idle, session ids
@@ -205,6 +218,14 @@ point, so it carries less context and its turns are faster.
 - An agent can't be rewound while it is busy or has messages waiting. The person running the session
   can rewind any claude agent over the socket (`{"op": "context", "from": "user", …}`); they aren't
   limited by `manages`.
+
+<a id="images"></a>**Images.** A message can carry images (`.png`, `.jpg`, `.gif`, `.webp`, up to 20 MB each):
+`landline send coder "What's wrong with this plot?" --image plot.png`, the `images` argument of
+`message_agent`, or `"images": [paths]` in the socket's `send` op. The hub copies them into the run
+(`runs/<run>/images/`) and lists their paths in the message record. claude agents get them with the
+message itself (up to 5 MB each; larger ones by path). agy's input is text only, so agy agents get the
+paths and open the images with their `view_file` tool. Both were checked live: each read the text in a
+test image.
 
 **Restarting a team.** The run's `run.json` lists every agent, including spawned ones, with their session
 ids, and is itself a valid config: `landline up ~/.agentlandline/runs/<run>/run.json` brings the whole team

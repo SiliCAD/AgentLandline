@@ -155,7 +155,7 @@ def _hub_client() -> HubClient:
     return HubClient(os.environ.get("LANDLINE_SOCKET") or None)
 
 
-def message_agent(to: str, text: str, wait: bool = True) -> str:
+def message_agent(to: str, text: str, wait: bool = True, images: Optional[list] = None) -> str:
     """
     Send a message to another agent in this multi-agent session (or to 'user', the human watching).
 
@@ -164,10 +164,12 @@ def message_agent(to: str, text: str, wait: bool = True) -> str:
         text: The message. Be self-contained: the other agent can't see your conversation.
         wait: If true (default), wait until the agent has handled the message and return its reply.
               If false, return once the message is queued.
+        images: Optional image files to attach (paths to .png, .jpg, .gif or .webp files), e.g. a plot
+                or a screenshot the other agent should look at.
     """
-    logger.info(f"[TOOL CALL] message_agent: from={HUB_AGENT!r} to={to!r} wait={wait}")
+    logger.info(f"[TOOL CALL] message_agent: from={HUB_AGENT!r} to={to!r} wait={wait} images={images!r}")
     try:
-        res = _hub_client().send(HUB_AGENT, to, text, wait=wait)
+        res = _hub_client().send(HUB_AGENT, to, text, wait=wait, images=images or None)
     except HubError as e:
         return json.dumps({"status": "ERROR", "error": str(e)}, indent=2)
     if not res.get("ok"):
