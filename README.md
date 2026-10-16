@@ -143,7 +143,7 @@ At the top level, `run` names the run (default: a timestamp).
 landline up run.json
 ```
 
-**3. Talk to it** from another terminal:
+**3. Talk to it** from another terminal in the same folder. Each folder has its own hub, so hubs started in different folders run independently; elsewhere, pass `--socket` (the path `landline up` prints) or set `$LANDLINE_SOCKET`.
 
 ```bash
 landline send planner "Write a small script that prints the first 10 prime numbers, get it reviewed, and tell me the result"

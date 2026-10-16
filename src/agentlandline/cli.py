@@ -212,7 +212,7 @@ def cmd_messages(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="landline", description="Run and talk to a multi-agent AgentLandline hub.")
-    parser.add_argument("--socket", help="Hub socket path (default: $LANDLINE_SOCKET or ~/.agentlandline/hub.sock)")
+    parser.add_argument("--socket", help="Hub socket path (default: $LANDLINE_SOCKET, or this folder's own socket under ~/.agentlandline/hubs/)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     up = sub.add_parser("up", help="Start a hub (with the agents in a run config, if given) and print live activity")
