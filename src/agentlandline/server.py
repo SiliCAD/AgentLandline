@@ -226,11 +226,82 @@ def manage_context(agent: str, action: str = "list", after: str = "", note: str 
     return json.dumps({"status": "OK", **res}, indent=2)
 
 
+def _team(action: str, **fields) -> str:
+    try:
+        res = _hub_client().team(HUB_AGENT, action, **fields)
+    except HubError as e:
+        return json.dumps({"status": "ERROR", "error": str(e)}, indent=2)
+    if not res.get("ok"):
+        return json.dumps({"status": "ERROR", "error": res.get("error")}, indent=2)
+    res.pop("ok", None)
+    return json.dumps({"status": "OK", **res}, indent=2)
+
+
+def start_agent(name: str, role: str = "", backend: str = "", model: str = "", effort: str = "",
+                session_id: str = "", fork: bool = False, from_agent: str = "", after: str = "", cwd: str = "") -> str:
+    """
+    Start a new agent in this multi-agent session. It joins the team (everyone is told) and you can
+    message it with message_agent. You can stop it later with stop_agent.
+
+    Three ways to start it:
+    - A new conversation: give just a name and a role (and backend/model/effort if you like).
+    - An existing session (see find_sessions): session_id continues it; with fork=true it starts on a
+      copy, leaving the original as it is. A session another running agent uses can only be forked.
+    - A copy of a teammate: from_agent copies that agent's conversation as it is now, or, with after,
+      only up to its reply to that message (see manage_context's list). The copy starts with the
+      teammate's context, so it needs no long briefing: use it to try another approach in parallel.
+
+    Args:
+        name: Name for the new agent (letters, digits, - or _), e.g. 'fixer-2'.
+        role: What it is for; the other agents are told.
+        backend: 'claude' or 'agy' (default: claude, or the copied agent's).
+        model: Model for its CLI (default: the CLI's own, or the copied agent's).
+        effort: Reasoning effort (default: the CLI's own, or the copied agent's).
+        session_id: An existing claude/agy session to open.
+        fork: With session_id: start on a copy of it instead of continuing it.
+        from_agent: A teammate to copy.
+        after: With from_agent: the message id whose reply the copy is cut after.
+        cwd: Folder it works in (default: yours, or the copied agent's).
+    """
+    logger.info(f"[TOOL CALL] start_agent: from={HUB_AGENT!r} name={name!r} from_agent={from_agent!r} after={after!r}")
+    return _team("start", name=name, role=role or None, backend=backend or None, model=model or None,
+                 effort=effort or None, session_id=session_id or None, fork=fork, from_agent=from_agent or None,
+                 after=after or None, cwd=cwd or None)
+
+
+def stop_agent(name: str) -> str:
+    """
+    Stop an agent you started with start_agent. Its messages stay on the record; the others are told it left.
+
+    Args:
+        name: The agent to stop.
+    """
+    logger.info(f"[TOOL CALL] stop_agent: from={HUB_AGENT!r} name={name!r}")
+    return _team("stop", name=name)
+
+
+def find_sessions(query: str = "", limit: int = 20) -> str:
+    """
+    Saved agent sessions on this machine (from earlier multi-agent runs), newest first: run, agent name,
+    backend, model, role, folder, session_id, and which running agent uses it (if any). Open one with
+    start_agent(session_id=..., fork=true).
+
+    Args:
+        query: Only sessions whose run, agent name, role or folder contain this text.
+        limit: At most this many (default 20).
+    """
+    return _team("sessions", query=query or None, limit=limit)
+
+
 if HUB_AGENT:
     mcp.tool()(message_agent)
     mcp.tool()(list_agents)
     if os.environ.get("LANDLINE_MANAGES"):
         mcp.tool()(manage_context)
+    if os.environ.get("LANDLINE_SPAWNS"):
+        mcp.tool()(start_agent)
+        mcp.tool()(stop_agent)
+        mcp.tool()(find_sessions)
 
 
 def main():

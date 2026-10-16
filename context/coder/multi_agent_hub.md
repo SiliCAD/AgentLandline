@@ -77,6 +77,17 @@ landline up run.json
     the cut, and the original session file is unchanged. agy isn't supported (REWIND_BACKENDS); its
     conversations can be cut by deleting `steps` rows from a copy of its SQLite file, but that format is
     private.
+- **Agents starting agents**: `AgentSpec.spawns` (`context.normalize_spawns`; defaults `DEFAULT_SPAWNS`) sets
+  `LANDLINE_SPAWNS`, which registers `start_agent`, `stop_agent` and `find_sessions` (op `team`, actions
+  `start`/`stop`/`sessions`). `Hub.start_agent` checks the rules and the caller's running count
+  (`spawned_by == caller`), then builds an AgentSpec and calls `spawn()`:
+  - `from_agent`: `session_id` = that agent's session. Without `after`, `fork=True` (a whole copy). With
+    `after`, `spec.rewind = {at: checkpoint cut, session_id: new}`, the same path as a rewind, but in a new
+    slot, so the original keeps running.
+  - `session_id` alone continues it, unless a running agent uses it: then only `fork=True` is allowed.
+
+  `_new_slot` handles `fork` and `rewind` alike: it starts the pipeline on the copy, then gives the slot
+  a spec with the copy's `session_id`. `find_sessions` reads every `runs/*/run.json` under the hub's home.
 - **Images** (`images.py`): `send(..., images=[paths])` checks them (type, size), copies them to
   `runs/<run>/images/<random>-<name>`, and stores the copies' paths in the record (`images`). The worker
   passes them to ClaudePipeline.send(images=...), which adds base64 image blocks after the text
@@ -160,6 +171,8 @@ One JSON request line per connection, answered with one JSON line (`subscribe` k
 {"op": "rename", "run": "opamp-review"}
 {"op": "adopt", "run": "run-20261012-022025-7b62"}
 {"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "...", "manages": null, "fork": false}
+{"op": "team", "from": "lead", "action": "start", "name": "fixer-2", "from_agent": "fixer", "after": "m7", "role": "..."}
+{"op": "team", "from": "lead", "action": "sessions", "query": "opamp"}
 {"op": "context", "from": "lead", "agent": "fixer", "action": "list"}
 {"op": "context", "from": "lead", "agent": "fixer", "action": "rewind", "after": "m7", "note": "..."}
 {"op": "subscribe"}

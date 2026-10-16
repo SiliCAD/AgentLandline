@@ -149,3 +149,48 @@ class Checkpoints:
             elif entry.get("message_id"):
                 out.append(entry)
         return out
+
+
+# --------------------------------------------------------------------------
+# Starting agents: an agent's `spawns` setting lets it start other agents in
+# the session (start_agent), stop the ones it started, and look through saved
+# sessions (find_sessions):
+#
+#     "spawns": true
+#     "spawns": {"max": 2, "backends": ["claude"], "sessions": false, "fork_from": ["fixer"], "stop": true}
+
+DEFAULT_SPAWNS: Dict[str, Any] = {
+    "max": 3,                              # agents it started that may run at once
+    "backends": ["claude", "antigravity"],
+    "sessions": True,                      # may open existing sessions (by id) and find_sessions
+    "fork_from": ["*"],                    # agents of this session it may copy ("*": any)
+    "stop": True,                          # may stop the agents it started
+}
+
+
+def normalize_spawns(value: Any) -> Optional[Dict[str, Any]]:
+    """Checks a `spawns` setting; returns its rules with defaults filled in, or None if it may not start agents."""
+    if value is None or value is False:
+        return None
+    if value is True:
+        return dict(DEFAULT_SPAWNS)
+    if not isinstance(value, dict):
+        raise ContextError("'spawns' must be true or an object of settings")
+    unknown = set(value) - set(DEFAULT_SPAWNS)
+    if unknown:
+        raise ContextError(f"spawns: unknown setting(s) {', '.join(sorted(unknown))}; known: {', '.join(DEFAULT_SPAWNS)}")
+    rules = {**DEFAULT_SPAWNS, **value}
+    if not isinstance(rules["max"], int) or isinstance(rules["max"], bool) or rules["max"] < 1:
+        raise ContextError("spawns.max: a number of agents, at least 1")
+    if not isinstance(rules["backends"], list) or not rules["backends"]:
+        raise ContextError("spawns.backends: a list, e.g. [\"claude\"]")
+    try:
+        rules["backends"] = [normalize_backend(b) for b in rules["backends"]]
+    except ValueError as e:
+        raise ContextError(f"spawns.backends: {e}")
+    if not isinstance(rules["fork_from"], list) or not all(isinstance(n, str) for n in rules["fork_from"]):
+        raise ContextError("spawns.fork_from: a list of agent names, or [\"*\"]")
+    for key in ("sessions", "stop"):
+        if not isinstance(rules[key], bool):
+            raise ContextError(f"spawns.{key}: true or false")
+    return rules
