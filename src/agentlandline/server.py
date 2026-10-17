@@ -9,6 +9,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP, Context
 from .issue_reporter import IssueReporter
 from .agent_manager import AgentManager
+from .context_windows import describe as describe_context
 from .hub import HubClient, HubError
 
 # Configure logger
@@ -185,14 +186,16 @@ def message_agent(to: str, text: str, wait: bool = True, images: Optional[list] 
 
 def list_agents() -> str:
     """
-    List the agents in this multi-agent session: name, role, backend, and whether each is busy.
+    List the agents in this multi-agent session: name, role, backend, whether each is busy, and
+    how full its context window is (e.g. "410k / 1M (41%)"; null until it has made a model call).
     """
     try:
         res = _hub_client().list_agents()
     except HubError as e:
         return json.dumps({"status": "ERROR", "error": str(e)}, indent=2)
     agents = [
-        {k: a.get(k) for k in ("name", "role", "backend", "model", "busy", "queued")}
+        {**{k: a.get(k) for k in ("name", "role", "backend", "model", "busy", "queued")},
+         "context": describe_context(a.get("context"))}
         for a in res.get("agents", [])
     ]
     return json.dumps({"you": HUB_AGENT, "agents": agents}, indent=2)

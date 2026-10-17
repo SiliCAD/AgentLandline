@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
+from .context_windows import ContextWindows
 from .context import Checkpoints, ContextError, REWIND_BACKENDS, normalize_manages, normalize_spawns, rules_for
 from . import images as image_files
 from .events import normalize, agy_completed_step, agy_step_thinking
@@ -101,6 +102,11 @@ class AgentSpec:
     # Set only while starting a rewound copy: {"at": <message uuid>, "session_id": <the fork's id>}.
     # Not saved in run.json.
     rewind: Optional[Dict[str, str]] = None
+    # Its context window in tokens, for models the hub can't find one for (agentlandline.context_windows).
+    context_window: Optional[int] = None
+    # How full its context was when run.json was last written ({"used": tokens}), so a resumed
+    # session shows it before the agent's next model call. Read from run.json's "context".
+    last_context: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, name: str, data: Dict[str, Any]) -> "AgentSpec":
@@ -119,6 +125,14 @@ class AgentSpec:
         if spec.fork and not spec.session_id:
             raise HubError(f"Agent '{name}': 'fork' needs the 'session_id' of the session to fork.")
         spec.forked_from = data.get("forked_from")
+        window = data.get("context_window")
+        if window is not None:
+            if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+                raise HubError(f"Agent '{name}': 'context_window' must be a number of tokens.")
+            spec.context_window = window
+        saved = data.get("context")
+        if isinstance(saved, dict) and isinstance(saved.get("used"), int):
+            spec.last_context = {"used": saved["used"]}
         previous = data.get("previous_sessions") or []
         spec.previous_sessions = [str(s) for s in previous] if isinstance(previous, list) else []
         try:
@@ -182,6 +196,13 @@ class _AgentSlot:
         self.stopping = False
         self.known_agents: set = set()  # other agents this agent has been told about
         self.reported_model: Optional[str] = None  # what the CLI says it is running
+        # How full its context window is: the tokens of its latest model call (prompt + output
+        # so far), None until it makes one. `context_reported` is the window its CLI reported.
+        saved = spec.last_context or {}
+        self.context_prompt: Optional[int] = saved.get("used")
+        self.context_output = 0
+        self.context_reported: Optional[int] = None
+        self.context_sent = 0.0  # when the last "context" event went out
         # Session id from the CLI's init event. The pipelines notify listeners before
         # they store it themselves, so the hub keeps its own copy for run.json.
         self.reported_session: Optional[str] = None
@@ -217,6 +238,7 @@ class Hub:
         self.log = MessageLog(self.run_dir)
         self.checkpoints = Checkpoints(lambda: self.run_dir)
         self.started_at = _now()
+        self.context_windows = ContextWindows(self.home)
         self._pipeline_factory = pipeline_factory or self._make_pipeline
         self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
         self._lock = threading.Lock()
@@ -238,6 +260,8 @@ class Hub:
             env["LANDLINE_MANAGES"] = "1"  # the agent gets the manage_context tool
         if spec.spawns:
             env["LANDLINE_SPAWNS"] = "1"   # the agent gets start_agent, stop_agent and find_sessions
+        if spec.fork or spec.rewind:
+            spec = replace(spec, last_context=None)  # a copy: its size is known after its first call
         if spec.fork:
             spec = replace(spec, rewind={"session_id": str(uuid.uuid4())}, forked_from=spec.session_id)
         if spec.rewind:
@@ -477,6 +501,16 @@ class Hub:
         if slot.spec.backend == "claude" and raw.get("type") == "assistant" and raw.get("uuid"):
             slot.last_uuid = raw["uuid"]
         for event in normalize(slot.spec.backend, raw):
+            if event["kind"] == "context":
+                self._update_context(slot, event)
+                continue
+            if event["kind"] == "compacted":
+                slot.context_prompt, slot.context_output = event.get("post_tokens"), 0
+                self._emit_context(slot, now=True)
+            if event["kind"] == "turn_end":
+                self._learn_window(slot, event.get("context_windows") or {})
+                if slot.context_prompt is not None:
+                    self._emit_context(slot, now=True)  # the turn's last output count, and the window
             if event["kind"] == "tool_start":
                 slot.turn_tools += 1
             if event["kind"] == "session":
@@ -491,6 +525,38 @@ class Hub:
             step = agy_completed_step(raw)
             if step is not None:
                 self._emit_agy_thinking(name, step, attempts=3)
+
+    CONTEXT_EVERY = 1.0  # seconds between "context" events while an agent writes
+
+    def _update_context(self, slot: _AgentSlot, event: Dict[str, Any]):
+        new_call = "prompt" in event
+        if new_call:
+            slot.context_prompt = event["prompt"]
+        slot.context_output = event.get("output") or 0
+        self._emit_context(slot, now=new_call)
+
+    def _emit_context(self, slot: _AgentSlot, now: bool = False):
+        if not now and time.monotonic() - slot.context_sent < self.CONTEXT_EVERY:
+            return
+        slot.context_sent = time.monotonic()
+        self._emit({"kind": "context", "agent": slot.spec.name, **(self.context_of(slot) or {"used": None, "window": None})})
+
+    def _learn_window(self, slot: _AgentSlot, windows: Dict[str, int]):
+        """claude reported its model's window: remember it for this model (and the name it was asked for)."""
+        model = self.model_in_use(slot)
+        size = windows.get(model) if model in windows else (next(iter(windows.values())) if len(windows) == 1 else None)
+        if not size:
+            return
+        slot.context_reported = size
+        for name in {model, slot.spec.model} - {None}:
+            self.context_windows.learn(name, size)
+
+    def context_of(self, slot: _AgentSlot) -> Optional[Dict[str, Any]]:
+        """How full the agent's context window is: {"used": tokens, "window": tokens or None}, or None if unknown."""
+        if slot.context_prompt is None:
+            return None
+        window = slot.spec.context_window or slot.context_reported or self.context_windows.window(self.model_in_use(slot))
+        return {"used": slot.context_prompt + slot.context_output, "window": window}
 
     def _emit_agy_thinking(self, name: str, step: int, attempts: int):
         # The transcript line can land slightly after the stream event; retry briefly.
@@ -830,6 +896,9 @@ class Hub:
                 pass
             raise HubError(f"Couldn't start '{agent}' {doing}: {e}")
         slot.reported_model, slot.introduced = old.reported_model, old.introduced
+        if doing == "restarted":  # same conversation, so the same context
+            slot.context_prompt, slot.context_output = old.context_prompt, old.context_output
+            slot.context_reported = old.context_reported
         slot.known_agents = set(old.known_agents)
         slot.notice = notice
         with self._lock:
@@ -1058,6 +1127,7 @@ class Hub:
             "spawns": slot.spec.spawns,
             "busy": slot.busy,
             "queued": slot.inbox.qsize(),
+            "context": self.context_of(slot),
         }
 
     def list_agents(self) -> List[Dict[str, Any]]:
@@ -1078,8 +1148,9 @@ class Hub:
             "messages": self.log.path,
             "agents": {
                 name: {**{k: v for k, v in asdict(slot.spec).items()
-                          if k not in ("name", "rewind")
-                          and not (k in ("manages", "spawns", "spawned_by", "previous_sessions", "fork", "forked_from")
+                          if k not in ("name", "rewind", "last_context")
+                          and not (k in ("manages", "spawns", "spawned_by", "previous_sessions", "fork", "forked_from",
+                                         "context_window")
                                    and not v)},
                        # The folder the agent actually works in, even when the config left it
                        # to the hub's folder: resuming needs it (claude finds sessions by folder).
@@ -1087,6 +1158,8 @@ class Hub:
                        "session_id": slot.session_id,
                        "model_in_use": self.model_in_use(slot),
                        **({"stopped": True} if slot.stopping else {}),
+                       **({"context": {"used": slot.context_prompt + slot.context_output}}
+                          if slot.context_prompt is not None else {}),
                        "transcript": slot.pipeline.transcript_path()}
                 for name, slot in self._run_file_agents()
             },
