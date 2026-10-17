@@ -20,6 +20,7 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from .context_windows import describe as describe_context
 from .hub import Hub, HubServer, HubClient, HubError, load_config
 
 PREVIEW_CHARS = 240
@@ -88,6 +89,8 @@ class EventPrinter:
             self._line(ts, agent, f"  {mark} {self._short(event.get('output') or '')}")
         elif kind == "turn_start":
             self._line(ts, agent, self._paint(f"● working on {event.get('message_id')}", "2"))
+        elif kind == "compacted":
+            self._line(ts, agent, self._paint(f"■ context compacted ({event.get('pre_tokens')} → {event.get('post_tokens')} tokens)", "33"))
         elif kind == "interrupted":
             self._line(ts, agent, self._paint(f"■ interrupted by {event.get('by')} ({event.get('message_id')})", "33"))
         elif kind == "turn_end" and not event.get("ok") and not event.get("interrupted"):
@@ -193,7 +196,9 @@ def cmd_ls(args) -> int:
         state = "busy" if a["busy"] else "idle"
         queued = f", {a['queued']} queued" if a.get("queued") else ""
         role = f" — {a['role']}" if a.get("role") else ""
-        print(f"  {a['name']:<12} {a['backend']:<12} {state}{queued}  session={a.get('session_id')}{role}")
+        context = describe_context(a.get("context"))
+        context = f"  context {context}" if context else ""
+        print(f"  {a['name']:<12} {a['backend']:<12} {state}{queued}{context}  session={a.get('session_id')}{role}")
     return 0
 
 

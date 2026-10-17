@@ -151,6 +151,8 @@ Per agent: `backend` (`claude`/`agy`, required), and optionally:
   so the hub copies the conversation's files.
 - `manages`: the agents whose context this agent may manage (see below).
 - `spawns`: whether this agent may start agents of its own (see below).
+- `context_window`: its context window in tokens, for a model the hub has no size for (see
+  [How full each agent's context is](#context-window)).
 
 At the top level, `run` names the run (default: a timestamp).
 
@@ -186,6 +188,22 @@ next message.
 queued for it fail with "stopped", and the other agents are told it left. It stays in the run's `run.json`
 marked `"stopped": true`, so resuming the session brings it back. `landline rename <name>` renames the
 running session: its folder under `runs/` moves to the new name, which then identifies it everywhere.
+
+<a id="context-window"></a>**How full each agent's context is.** The hub follows each agent's context
+window live, from the CLIs' own streams: claude reports what each model call is sent (`message_start`) and
+its output as it writes, and agy reports each step's usage when the step ends. So a long run of tool
+calls updates it after every step, not only when the agent replies. The turn's final usage is a sum over
+its calls, so it isn't used. The hub emits `{"kind": "context", "agent", "used", "window"}` (at once for each
+new call, at most once a second while an agent writes), and `list_agents` (the socket op, the MCP tool
+and `landline ls`) includes it, so a lead with `manages` can see when a teammate is getting full and
+rewind it. `run.json` saves the last count, so a resumed session shows it before the agent's next call.
+A rewound or copied agent starts unknown until its first call. When claude compacts a conversation
+(`compact_boundary`) the count drops to what's left and the hub passes on a `compacted` event (not seen
+live yet: compaction wasn't triggered in testing). Window sizes: claude reports its model's window at the
+end of each turn, and the hub remembers it per model in `~/.agentlandline/context_windows.json`; agy
+doesn't report one (it keeps it for its interactive status line), so its models come from a table in
+`context_windows.py`. An agent's `context_window` setting overrides both; with no size known, only the
+count is shown.
 
 **Interrupting an agent.** `landline send <name> "…" --force` (socket: `"force": true` in the `send` op,
 user only; used by MultiMind's `!force`) puts the message ahead of the ones waiting for that agent and
