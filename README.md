@@ -167,6 +167,7 @@ landline send planner "Write a small script that prints the first 10 prime numbe
 landline spawn claude reviewer --model sonnet --role "Reviews the coder's changes"   # add an agent
 landline spawn claude fixer --session <session id> --fork   # start on a copy of an existing session
 landline send coder "What does this show?" --image plot.png   # attach an image
+landline send coder "Stop, use the other netlist" --force   # interrupt its current turn, handle this first
 landline stop reviewer           # stop one agent (resuming the session brings it back)
 landline rename opamp-review     # give the session a memorable name
 landline ls          # agents, busy/idle, session ids
@@ -185,6 +186,16 @@ next message.
 queued for it fail with "stopped", and the other agents are told it left. It stays in the run's `run.json`
 marked `"stopped": true`, so resuming the session brings it back. `landline rename <name>` renames the
 running session: its folder under `runs/` moves to the new name, which then identifies it everywhere.
+
+**Interrupting an agent.** `landline send <name> "…" --force` (socket: `"force": true` in the `send` op,
+user only; used by MultiMind's `!force`) puts the message ahead of the ones waiting for that agent and
+interrupts the turn it's running, so the agent starts on this message right away. The agent and its
+conversation stay; only the running turn stops (claude: an `interrupt` control request, like Esc;
+agy: SIGINT, after which the hub resumes its conversation in a new agy process). The message whose turn
+was cut short gets `[interrupted by the user]` as its reply, so an agent waiting on it isn't left
+hanging, and the forced message tells the agent which message it was taken off. The hub emits
+`{"kind": "interrupted", "agent", "message_id", "by"}`, and that turn's `turn_end` carries
+`"interrupted": true`. If the agent is idle, the message is simply delivered first.
 
 **Managing another agent's context.** An agent with a `manages` setting gets one more MCP tool,
 `manage_context`. With it, a lead can list another agent's turns and rewind that agent to just after one

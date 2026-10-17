@@ -3,6 +3,7 @@
 
     landline up [run.json]         start a hub (with the agents in run.json) and print live activity
     landline send coder "..."      message an agent (as 'user') and print its reply
+    landline send coder "..." --force   interrupt what it's doing and handle this first
     landline spawn claude reviewer --role "..."   start another agent in the running hub
     landline stop reviewer         stop one agent (resuming the session brings it back)
     landline rename opamp-review   give the running session a memorable name
@@ -87,7 +88,9 @@ class EventPrinter:
             self._line(ts, agent, f"  {mark} {self._short(event.get('output') or '')}")
         elif kind == "turn_start":
             self._line(ts, agent, self._paint(f"● working on {event.get('message_id')}", "2"))
-        elif kind == "turn_end" and not event.get("ok"):
+        elif kind == "interrupted":
+            self._line(ts, agent, self._paint(f"■ interrupted by {event.get('by')} ({event.get('message_id')})", "33"))
+        elif kind == "turn_end" and not event.get("ok") and not event.get("interrupted"):
             self._line(ts, agent, self._paint("✗ turn ended with an error", "31"))
 
 
@@ -140,10 +143,12 @@ def cmd_up(args) -> int:
 
 def cmd_send(args) -> int:
     res = HubClient(args.socket).send(args.sender, args.agent, " ".join(args.text), wait=not args.no_wait,
-                                      images=args.image)
+                                      images=args.image, force=args.force)
     if not res.get("ok"):
         print(f"landline: {res.get('error')}", file=sys.stderr)
         return 1
+    if res.get("interrupted"):
+        print(f"(interrupted its turn on {res['interrupted']})", file=sys.stderr)
     if res.get("reply"):
         print(res["reply"]["text"])
     else:
@@ -228,6 +233,8 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--from", dest="sender", default="user", help="Sender name (default: user)")
     send.add_argument("--no-wait", action="store_true", help="Return once queued instead of waiting for the reply")
     send.add_argument("--image", action="append", metavar="PATH", help="Attach an image file (repeatable)")
+    send.add_argument("--force", action="store_true",
+                      help="Interrupt the agent's current turn and handle this message first")
     send.set_defaults(func=cmd_send)
 
     spawn = sub.add_parser("spawn", help="Start another agent in the running hub")
