@@ -9,6 +9,7 @@ import json
 import time
 import queue
 import shutil
+import signal
 import sqlite3
 import logging
 import threading
@@ -84,6 +85,13 @@ class AgyPipeline:
         self._turn_done_event = threading.Event()
         self._current_turn_result: Optional[AgentTurnResult] = None
         self._current_tools_by_step: Dict[int, ToolExecution] = {}
+
+        # Interrupting the running turn (interrupt()), from another thread than send()'s.
+        self._interrupt_lock = threading.Lock()
+        self._in_turn = False              # a send() is running
+        self._prompt_sent = False          # its prompt is on agy's stdin
+        self._interrupt_requested = False
+        self._exited_on_interrupt = False  # agy ends its process with the interrupted turn
 
     def set_conversation_id(self, conversation_id: Optional[str]):
         """Configures or updates the conversation ID to resume before starting the pipeline."""
@@ -356,11 +364,69 @@ class AgyPipeline:
 
         return questions
 
+    def interrupt(self) -> bool:
+        """
+        Stops the running turn, the way Ctrl+C does in agy: agy ends the turn (send() returns
+        with status INTERRUPTED) and exits, and the next send() resumes the same conversation.
+        Safe to call from any thread. Returns False when no turn is running. A turn whose
+        prompt isn't on agy's stdin yet (agy is restarting) is interrupted as soon as it is.
+        """
+        with self._interrupt_lock:
+            if not self._in_turn:
+                return False
+            if not self._interrupt_requested and self._prompt_sent:
+                self._send_interrupt()
+            self._interrupt_requested = True
+            return True
+
+    def _send_interrupt(self):
+        # agy's stream-json input has no control messages; SIGINT ends the turn with an
+        # "interrupted" result, after which agy exits.
+        self._exited_on_interrupt = True
+        try:
+            self.proc.send_signal(signal.SIGINT)
+        except (OSError, AttributeError) as e:  # agy is gone, which ends the turn anyway
+            logger.warning(f"Couldn't interrupt agy ({e}).")
+
+    def _prompt_written(self):
+        with self._interrupt_lock:
+            self._prompt_sent = True
+            if self._interrupt_requested:  # interrupt() came while the prompt was on its way
+                self._send_interrupt()
+
+    def _reap_interrupted(self):
+        """Waits for agy to exit after an interrupt, so the next turn resumes its conversation in a new process."""
+        self._exited_on_interrupt = False
+        proc, reader = self.proc, self._reader_thread
+        if proc is not None:
+            try:
+                proc.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                pass  # close() kills it
+        self.close()
+        if reader is not None:
+            reader.join(timeout=5.0)  # its exit would otherwise mark the new process as not running
+
     def send(self, prompt: str, timeout: float = 120.0) -> AgentTurnResult:
         """
         Sends a user prompt to the agent and waits for the turn to complete.
         Maintains conversational context across calls.
         """
+        with self._interrupt_lock:
+            self._in_turn = True
+        try:
+            if self._exited_on_interrupt:
+                self._reap_interrupted()
+            result = self._send_turn(prompt, timeout)
+        finally:
+            with self._interrupt_lock:
+                interrupted = self._interrupt_requested
+                self._in_turn = self._prompt_sent = self._interrupt_requested = False
+        if interrupted:
+            result.status, result.error = "INTERRUPTED", "Interrupted."
+        return result
+
+    def _send_turn(self, prompt: str, timeout: Optional[float]) -> AgentTurnResult:
         # Auto-recover if agy process was killed or closed
         if not self._running or self.proc is None or self.proc.poll() is not None:
             logger.warning("Pipeline process not running. Auto-restarting session...")
@@ -400,6 +466,7 @@ class AgyPipeline:
                 if self.proc and self.proc.stdin:
                     self.proc.stdin.write(msg_str)
                     self.proc.stdin.flush()
+            self._prompt_written()
 
             finished = self._turn_done_event.wait(timeout=timeout)
             if not finished:

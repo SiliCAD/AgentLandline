@@ -17,6 +17,7 @@ import logging
 import threading
 import subprocess
 import argparse
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Callable
@@ -116,6 +117,12 @@ class ClaudePipeline:
         self._turn_done_event = threading.Event()
         self._current_turn_result: Optional[AgentTurnResult] = None
         self._current_tools_by_id: Dict[str, ToolExecution] = {}
+
+        # Interrupting the running turn (interrupt()), from another thread than send()'s.
+        self._interrupt_lock = threading.Lock()
+        self._in_turn = False              # a send() is running
+        self._prompt_sent = False          # its prompt is on the CLI's stdin
+        self._interrupt_requested = False
 
     def set_conversation_id(self, conversation_id: Optional[str]):
         """Configures or updates the session ID to resume before starting the pipeline."""
@@ -417,11 +424,54 @@ class ClaudePipeline:
 
         return questions
 
+    def interrupt(self) -> bool:
+        """
+        Stops the running turn, the way Esc does in Claude Code: the CLI ends the turn
+        (send() returns with status INTERRUPTED) and stays up on the same conversation.
+        Safe to call from any thread. Returns False when no turn is running. A turn whose
+        prompt isn't on the CLI's stdin yet (the CLI is restarting) is interrupted as soon as it is.
+        """
+        with self._interrupt_lock:
+            if not self._in_turn:
+                return False
+            if not self._interrupt_requested and self._prompt_sent:
+                self._send_interrupt()
+            self._interrupt_requested = True
+            return True
+
+    def _send_interrupt(self):
+        request = {"type": "control_request", "request_id": f"interrupt-{uuid.uuid4().hex[:12]}",
+                   "request": {"subtype": "interrupt"}}
+        try:
+            self.proc.stdin.write(json.dumps(request) + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError, AttributeError) as e:  # the CLI is gone, which ends the turn anyway
+            logger.warning(f"Couldn't send the interrupt to claude ({e}).")
+
+    def _prompt_written(self):
+        with self._interrupt_lock:
+            self._prompt_sent = True
+            if self._interrupt_requested:  # interrupt() came while the prompt was on its way
+                self._send_interrupt()
+
     def send(self, prompt: str, timeout: float = 120.0, images: Optional[List[str]] = None) -> AgentTurnResult:
         """
         Sends a user prompt to the agent and waits for the turn to complete.
         Maintains conversational context across calls.
         """
+        with self._interrupt_lock:
+            self._in_turn = True
+        try:
+            result = self._send_turn(prompt, timeout, images)
+        finally:
+            with self._interrupt_lock:
+                interrupted = self._interrupt_requested
+                self._in_turn = self._prompt_sent = self._interrupt_requested = False
+        if interrupted:
+            result.status, result.error = "INTERRUPTED", "Interrupted."
+        return result
+
+    def _send_turn(self, prompt: str, timeout: Optional[float], images: Optional[List[str]]) -> AgentTurnResult:
         # Auto-recover if claude process was killed or closed
         if not self._running or self.proc is None or self.proc.poll() is not None:
             logger.warning("Pipeline process not running. Auto-restarting session...")
@@ -465,6 +515,7 @@ class ClaudePipeline:
                 if self.proc and self.proc.stdin:
                     self.proc.stdin.write(msg_str)
                     self.proc.stdin.flush()
+            self._prompt_written()
 
             finished = self._turn_done_event.wait(timeout=timeout)
             if not finished:

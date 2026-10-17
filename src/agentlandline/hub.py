@@ -172,6 +172,11 @@ class _AgentSlot:
         self.pipeline = pipeline
         self.inbox: "queue.Queue[Optional[_Delivery]]" = queue.Queue()
         self.current_trigger: Optional[str] = None  # message id that started the running turn
+        # The delivery being handled; set and cleared under `lock`, so a forced message
+        # interrupts only the turn that was running when it arrived.
+        self.current: Optional[_Delivery] = None
+        self.lock = threading.Lock()
+        self.interrupted: Optional[_Delivery] = None  # the turn the user interrupted
         self.busy = False
         self.introduced = False
         self.stopping = False
@@ -479,6 +484,8 @@ class Hub:
                 slot.reported_session = event.get("session_id") or slot.reported_session
                 event = {**event, "model": self.model_in_use(slot)}
                 self._write_run_file()
+            if event["kind"] == "turn_end" and slot.interrupted is not None:
+                event = {**event, "interrupted": True}  # it can arrive before the "interrupted" event
             self._emit({**event, "agent": name})
         if slot.spec.backend == "antigravity":
             step = agy_completed_step(raw)
@@ -496,7 +503,7 @@ class Hub:
     # -------------------------------------------------------------- messaging
 
     def send(self, sender: str, to: str, text: str, wait: bool = True, timeout: Optional[float] = None,
-             images: Optional[List[str]] = None) -> Dict[str, Any]:
+             images: Optional[List[str]] = None, force: bool = False) -> Dict[str, Any]:
         """
         Sends `text` from `sender` (an agent name or 'user') to agent `to`.
         With wait=True, blocks until `to` has finished the turn this message
@@ -504,7 +511,12 @@ class Hub:
         Sending to 'user' just records the message (there is no inbox to deliver to).
         `images` are image file paths; they're copied into the run and attached
         (agentlandline.images).
+        With force=True (the user only), the message goes ahead of the ones waiting for
+        `to`, and the turn `to` is running now is interrupted, so this one starts right away.
+        The result then has `interrupted`: the id of the message whose turn was cut short.
         """
+        if force and sender != USER:
+            raise HubError("Only the user can interrupt an agent.")
         if sender != USER and sender not in self.agents:
             raise HubError(f"Unknown sender '{sender}'.")
         if to != USER and to not in self.agents:
@@ -531,12 +543,15 @@ class Hub:
             with self._lock:
                 self._waiting_on[sender] = to
         target = self.agents[to]
-        target.inbox.put(delivery)
+        # A forced send's result says which turn it interrupted (None: the agent was idle, or finished first).
+        extra = {"interrupted": self._force(target, delivery)} if force else {}
+        if not force:
+            target.inbox.put(delivery)
         if target.stopping:  # stopped between the lookup and the put
             delivery.error = f"Agent '{to}' was stopped."
             delivery.done.set()
         if not wait:
-            return {"status": "QUEUED", "message": record}
+            return {"status": "QUEUED", "message": record, **extra}
 
         try:
             finished = delivery.done.wait(timeout)
@@ -545,10 +560,42 @@ class Hub:
                 with self._lock:
                     self._waiting_on.pop(sender, None)
         if not finished:
-            return {"status": "TIMEOUT", "message": record, "error": f"No reply from '{to}' within {timeout}s; the message is still queued/in progress."}
+            return {"status": "TIMEOUT", "message": record, "error": f"No reply from '{to}' within {timeout}s; the message is still queued/in progress.", **extra}
         if delivery.error:
-            return {"status": "ERROR", "message": record, "error": delivery.error}
-        return {"status": "REPLIED", "message": record, "reply": delivery.reply}
+            return {"status": "ERROR", "message": record, "error": delivery.error, **extra}
+        return {"status": "REPLIED", "message": record, "reply": delivery.reply, **extra}
+
+    FORCE_GRACE = 2.0  # how long a forced message waits for the running turn's CLI call to begin
+
+    def _force(self, slot: _AgentSlot, delivery: _Delivery) -> Optional[str]:
+        """Queues `delivery` first and interrupts the running turn. Returns the interrupted message's id."""
+        with slot.lock:
+            with slot.inbox.mutex:  # queue.Queue can't put at the front itself
+                slot.inbox.queue.appendleft(delivery)
+                slot.inbox.unfinished_tasks += 1
+                slot.inbox.not_empty.notify()
+            running = slot.current
+        interrupt = getattr(slot.pipeline, "interrupt", None)
+        if running is None or interrupt is None:
+            return None
+        deadline = time.monotonic() + self.FORCE_GRACE
+        while True:
+            with slot.lock:
+                if slot.current is not running or running.done.is_set():
+                    return None  # the turn ended on its own
+                slot.interrupted = running  # before interrupt(): its reply may come back at once
+                if interrupt():
+                    slot.notice = (slot.notice or "") + (
+                        f"[The user interrupted your work on message {running.record['id']} "
+                        f"(from {running.record['from']}) to send you this.]\n")
+                    break
+                slot.interrupted = None
+            if time.monotonic() > deadline:  # the worker took the message but its turn never started
+                return None
+            time.sleep(0.01)
+        self._emit({"kind": "interrupted", "agent": slot.spec.name, "message_id": running.record["id"], "by": USER})
+        logger.info(f"User interrupted {slot.spec.name}'s turn on {running.record['id']}")
+        return running.record["id"]
 
     def _check_wait_cycle(self, sender: str, to: str):
         with self._lock:
@@ -582,6 +629,8 @@ class Hub:
             if delivery is None:
                 return
             record = delivery.record
+            with slot.lock:
+                slot.current = delivery
             slot.busy, slot.current_trigger = True, record["id"]
             slot.last_uuid, slot.turn_tools = None, 0
             self._emit({"kind": "turn_start", "agent": slot.spec.name, "message_id": record["id"]})
@@ -595,12 +644,18 @@ class Hub:
                     delivery.error = f"Agent '{slot.spec.name}' was stopped before replying."
                 else:
                     reply_text = result.response or f"[{result.status}] {result.error or 'no response'}"
+                    if slot.interrupted is delivery:
+                        reply_text = "[interrupted by the user]" + (f"\n\n{result.response}" if result.response else "")
                     delivery.reply = self._record(slot.spec.name, record["from"], reply_text, caused_by=record["id"])
                     self._checkpoint(slot, record, delivery.reply, result)
             except Exception as e:
                 logger.error(f"Agent {slot.spec.name} failed handling {record['id']}: {e}")
                 delivery.error = str(e)
             finally:
+                with slot.lock:
+                    slot.current = None
+                    if slot.interrupted is delivery:
+                        slot.interrupted = None
                 slot.busy, slot.current_trigger = False, None
                 self._emit({"kind": "idle", "agent": slot.spec.name})
                 delivery.done.set()
@@ -1083,7 +1138,7 @@ class HubServer:
                     if op == "send":
                         result = hub.send(request.get("from") or USER, request.get("to") or "", request.get("text") or "",
                                           wait=request.get("wait", True), timeout=request.get("timeout"),
-                                          images=request.get("images"))
+                                          images=request.get("images"), force=bool(request.get("force")))
                         self._reply({"ok": True, **result})
                     elif op == "spawn":
                         fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id",
@@ -1199,9 +1254,14 @@ class HubClient:
         return json.loads(line)
 
     def send(self, sender: str, to: str, text: str, wait: bool = True, timeout: Optional[float] = None,
-             images: Optional[List[str]] = None) -> Dict[str, Any]:
-        """`images`: image file paths to attach (absolute, or relative to this process's folder)."""
+             images: Optional[List[str]] = None, force: bool = False) -> Dict[str, Any]:
+        """
+        `images`: image file paths to attach (absolute, or relative to this process's folder).
+        `force` (the user only): interrupt `to`'s running turn and handle this message first.
+        """
         payload = {"op": "send", "from": sender, "to": to, "text": text, "wait": wait, "timeout": timeout}
+        if force:
+            payload["force"] = True
         if images:
             payload["images"] = [os.path.abspath(os.path.expanduser(p)) for p in images]
         return self.request(payload)
