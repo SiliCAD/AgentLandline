@@ -203,6 +203,7 @@ class _AgentSlot:
         self.context_output = 0
         self.context_reported: Optional[int] = None
         self.context_sent = 0.0  # when the last "context" event went out
+        self.context_last: Optional[Dict[str, Any]] = None  # what it said
         # Session id from the CLI's init event. The pipelines notify listeners before
         # they store it themselves, so the hub keeps its own copy for run.json.
         self.reported_session: Optional[str] = None
@@ -538,8 +539,11 @@ class Hub:
     def _emit_context(self, slot: _AgentSlot, now: bool = False):
         if not now and time.monotonic() - slot.context_sent < self.CONTEXT_EVERY:
             return
-        slot.context_sent = time.monotonic()
-        self._emit({"kind": "context", "agent": slot.spec.name, **(self.context_of(slot) or {"used": None, "window": None})})
+        context = self.context_of(slot) or {"used": None, "window": None}
+        if context == slot.context_last:  # e.g. agy's last step, then its turn's end
+            return
+        slot.context_sent, slot.context_last = time.monotonic(), context
+        self._emit({"kind": "context", "agent": slot.spec.name, **context})
 
     def _learn_window(self, slot: _AgentSlot, windows: Dict[str, int]):
         """claude reported its model's window: remember it for this model (and the name it was asked for)."""

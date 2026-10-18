@@ -132,8 +132,11 @@ def _normalize_agy(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         if step_type == "agent_response":
             out = [{"kind": "text_delta", "text": step["text_delta"]}] if step.get("text_delta") else []
             if state == "DONE" and isinstance(step.get("usage"), dict):  # the last step can carry text too
-                usage = step["usage"]  # this step's model call (the turn's result only has the sum)
-                out.append({"kind": "context", "prompt": usage.get("input_tokens") or 0,
+                # This step's model call (the turn's result is a running sum). input_tokens leaves out
+                # what came from agy's prompt cache, so after the first turns most of the context is
+                # in cache_read_tokens: the prompt is both.
+                usage = step["usage"]
+                out.append({"kind": "context", "prompt": (usage.get("input_tokens") or 0) + (usage.get("cache_read_tokens") or 0),
                             "output": usage.get("output_tokens") or 0})
             if out:
                 return out

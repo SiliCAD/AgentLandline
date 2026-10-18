@@ -191,7 +191,8 @@ running session: its folder under `runs/` moves to the new name, which then iden
 
 <a id="context-window"></a>**How full each agent's context is.** The hub follows each agent's context
 window live, from the CLIs' own streams: claude reports what each model call is sent (`message_start`) and
-its output as it writes, and agy reports each step's usage when the step ends. So a long run of tool
+its output as it writes, and agy reports each step's usage when the step ends. Both count cached tokens separately, so the
+count is input plus cache reads (plus output so far). So a long run of tool
 calls updates it after every step, not only when the agent replies. The turn's final usage is a sum over
 its calls, so it isn't used. The hub emits `{"kind": "context", "agent", "used", "window"}` (at once for each
 new call, at most once a second while an agent writes), and `list_agents` (the socket op, the MCP tool

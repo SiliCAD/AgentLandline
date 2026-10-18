@@ -53,6 +53,9 @@ def test_agy_reports_context_as_each_step_ends():
     step["step_update"]["text_delta"] = "done."  # the last step carries its text as well
     assert normalize("antigravity", step) == [{"kind": "text_delta", "text": "done."},
                                               {"kind": "context", "prompt": 13496, "output": 124}]
+    # Seen live: once agy caches the conversation, input_tokens is only the new part.
+    step["step_update"].update(text_delta=None, usage={"input_tokens": 2210, "cache_read_tokens": 79717, "output_tokens": 94})
+    assert normalize("antigravity", step) == [{"kind": "context", "prompt": 81927, "output": 94}]
     active = {"event": "step_update", "step_update": {"step_type": "agent_response", "state": "ACTIVE", "text_delta": "d"}}
     assert normalize("antigravity", active) == [{"kind": "text_delta", "text": "d"}]
 
@@ -147,7 +150,7 @@ def test_hub_tracks_each_agents_context_live_and_saves_it(home):
         pipelines["ag"].script = [{"event": "step_update", "step_update": {
             "step_type": "agent_response", "state": "DONE", "usage": {"input_tokens": 13000, "output_tokens": 120}}}]
         hub.send("user", "ag", "go")
-        assert [(e["used"], e["window"]) for e in events if e["agent"] == "ag"][-1] == (13120, 1_048_576)
+        assert [(e["used"], e["window"]) for e in events if e["agent"] == "ag"] == [(13120, 1_048_576)]  # sent once
     finally:
         hub.stop()
     run_file = os.path.join(home, "runs", "ctx", "run.json")
