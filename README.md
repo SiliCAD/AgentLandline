@@ -151,6 +151,7 @@ Per agent: `backend` (`claude`/`agy`, required), and optionally:
   so the hub copies the conversation's files.
 - `manages`: the agents whose context this agent may manage (see below).
 - `spawns`: whether this agent may start agents of its own (see below).
+- `wakeup`: messages the hub sends this agent when other agents have gone idle (see below).
 - `context_window`: its context window in tokens, for a model the hub has no size for (see
   [How full each agent's context is](#context-window)).
 
@@ -282,9 +283,34 @@ three more MCP tools:
 Started agents record `spawned_by` (and `forked_from` for copies) in run.json, so resuming the run brings
 them back.
 
-**Changing permissions while a session runs.** `manages` and `spawns` can be changed for a running agent
-(socket op `permissions`, used by MultiMind's `!permission`; only `from: "user"` is accepted). The new rules
-apply at once and are saved in run.json. An agent's CLI only learns which tools it has when it starts, so
+<a id="wakeup"></a>**Waking an agent up.** An agent's `wakeup` rules make the hub send it a message once the
+agents it watches have all gone idle, for long sessions that should keep going on their own. For example,
+when a team of claude agents stops mid-task because the account ran out of tokens, an agy agent can be
+woken up to start new agents (with `spawns`) and hand the work over:
+
+```json
+"rescuer": {"backend": "agy", "spawns": true,
+            "wakeup": {"when": "all", "idle_for": 120,
+                       "message": "The team has stopped. Find out where, then start agy agents to finish the work."}}
+```
+
+| Setting | Values | Default |
+| :--- | :--- | :--- |
+| `when` | `"all"` (every other agent in the session) or a list of agent names | `"all"` |
+| `idle_for` | seconds the watched agents must all have been idle | `60` |
+| `message` | what to send | required |
+
+`wakeup` can be one rule or a list of them. An agent counts as idle when it has no turn running and no
+message waiting, so an agent waiting on another agent's reply is still working. A rule fires once per idle
+stretch: after it fires, it waits until a watched agent has worked again. It never fires for a team that
+hasn't done anything yet (a fresh or just-resumed session). The woken agent's own work doesn't count, and
+agents that were never started or were stopped are skipped. The message comes from `user` and starts with
+`[wake-up: …]`, followed by the rule's text and where each watched agent stopped: its last message and
+whether that turn finished, failed (with the error, such as a usage limit) or was interrupted.
+
+**Changing permissions while a session runs.** `manages`, `spawns` and `wakeup` can be changed for a running
+agent (socket op `permissions`, used by MultiMind's `!permission`; only `from: "user"` is accepted; a request
+without `wakeup` leaves the wake-up rules as they are). The new rules apply at once and are saved in run.json. An agent's CLI only learns which tools it has when it starts, so
 when a change gives it tools or takes them away (`manage_context`, `start_agent` and the rest), the hub
 restarts its CLI on its own conversation: right away if it's idle, or right after its current turn, with
 messages waiting for it kept. Changing only the rules (a limit, which agents, notes) needs no restart.

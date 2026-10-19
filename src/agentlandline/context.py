@@ -194,3 +194,49 @@ def normalize_spawns(value: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(rules[key], bool):
             raise ContextError(f"spawns.{key}: true or false")
     return rules
+
+
+# --------------------------------------------------------------------------
+# Waking an agent up: an agent's `wakeup` rules make the hub send it a message
+# when the agents it watches have all been idle for a while, e.g. to take over
+# from a team that stopped because it ran out of tokens:
+#
+#     "wakeup": {"when": "all", "idle_for": 60, "message": "The team stopped; take over."}
+#     "wakeup": [{"when": ["coder", "tester"], "idle_for": 120, "message": "..."}, ...]
+#
+# `when` is "all" (every other agent in the session) or a list of agent names.
+
+WAKEUP_ALL = "all"
+DEFAULT_IDLE_FOR = 60
+WAKEUP_KEYS = ("when", "idle_for", "message")
+
+
+def normalize_wakeup(value: Any, agent: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    """Checks a `wakeup` setting; returns its rules in full form (a list), or None when there are none."""
+    if value in (None, False, [], {}):
+        return None
+    rules = value if isinstance(value, list) else [value]
+    out: List[Dict[str, Any]] = []
+    for index, rule in enumerate(rules):
+        where = f"wakeup[{index}]" if len(rules) > 1 else "wakeup"
+        if not isinstance(rule, dict):
+            raise ContextError(f"{where}: a rule must be an object with when, idle_for and message")
+        unknown = set(rule) - set(WAKEUP_KEYS)
+        if unknown:
+            raise ContextError(f"{where}: unknown setting(s) {', '.join(sorted(unknown))}; known: {', '.join(WAKEUP_KEYS)}")
+        when = rule.get("when", WAKEUP_ALL)
+        if isinstance(when, str) and when != WAKEUP_ALL:
+            when = [when]
+        if when != WAKEUP_ALL:
+            if not isinstance(when, list) or not when or not all(isinstance(n, str) and n for n in when):
+                raise ContextError(f"{where}.when: \"all\" or a list of agent names, e.g. [\"coder\"]")
+            if agent is not None and agent in when:
+                raise ContextError(f"{where}.when: an agent can't wait for itself to be idle")
+        idle_for = rule.get("idle_for", DEFAULT_IDLE_FOR)
+        if isinstance(idle_for, bool) or not isinstance(idle_for, (int, float)) or idle_for <= 0:
+            raise ContextError(f"{where}.idle_for: a number of seconds, more than 0")
+        message = rule.get("message")
+        if not isinstance(message, str) or not message.strip():
+            raise ContextError(f"{where}.message: the text to send when it fires")
+        out.append({"when": when if when == WAKEUP_ALL else list(when), "idle_for": idle_for, "message": message})
+    return out

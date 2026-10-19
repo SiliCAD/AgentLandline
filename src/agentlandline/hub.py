@@ -36,7 +36,8 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
 from .context_windows import ContextWindows
-from .context import Checkpoints, ContextError, REWIND_BACKENDS, normalize_manages, normalize_spawns, rules_for
+from .context import (Checkpoints, ContextError, REWIND_BACKENDS, WAKEUP_ALL, normalize_manages, normalize_spawns,
+                      normalize_wakeup, rules_for)
 from . import images as image_files
 from .events import normalize, agy_completed_step, agy_step_thinking
 from .message_log import MessageLog, count_lines
@@ -69,6 +70,16 @@ def default_socket_path(folder: Optional[str] = None) -> str:
     return os.path.join(landline_home(), "hubs", f"{name}-{digest}.sock")
 
 
+def _duration(seconds: float) -> str:
+    """'45s', '2m', '1h05m'."""
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m" + (f"{seconds % 60:02d}s" if seconds % 60 else "")
+    return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -97,6 +108,8 @@ class AgentSpec:
     spawns: Optional[Dict[str, Any]] = None
     # The agent that started this one with start_agent (set by the hub; kept in run.json).
     spawned_by: Optional[str] = None
+    # When the hub wakes this agent up with a message (agentlandline.context.normalize_wakeup).
+    wakeup: Optional[List[Dict[str, Any]]] = None
     # Sessions this agent had before it was rewound, newest last.
     previous_sessions: List[str] = field(default_factory=list)
     # Set only while starting a rewound copy: {"at": <message uuid>, "session_id": <the fork's id>}.
@@ -118,6 +131,7 @@ class AgentSpec:
         try:
             spec.manages = normalize_manages(data.get("manages"))
             spec.spawns = normalize_spawns(data.get("spawns"))
+            spec.wakeup = normalize_wakeup(data.get("wakeup"), name)
         except ContextError as e:
             raise HubError(f"Agent '{name}': {e}")
         spec.spawned_by = data.get("spawned_by")
@@ -211,6 +225,10 @@ class _AgentSlot:
         self.turn_tools = 0                   # tool calls in the running turn
         self.notice: Optional[str] = None     # put in front of the next message delivered to it
         self.restart_pending = False          # restart its CLI once the running turn ends (new tools)
+        # When its last turn ended (time.monotonic(); None: no turn yet) and how: {message_id, from, outcome}.
+        # The wake-up watcher reads them.
+        self.idle_since: Optional[float] = None
+        self.last_turn: Optional[Dict[str, Any]] = None
         # Started on an existing conversation (resumed or forked), so it already knows things.
         self.has_history = bool(spec.session_id or spec.forked_from)
 
@@ -251,6 +269,9 @@ class Hub:
         self._stopped: Dict[str, _AgentSlot] = {}
         # Agents of an adopted run that aren't running (yet): kept in run.json as saved.
         self._dormant: Dict[str, Dict[str, Any]] = {}
+        # Wake-up rules: the idle stretch each agent's rules last fired for, {agent: {rule index: stretch}}.
+        self._wakeup_fired: Dict[str, Dict[int, float]] = {}
+        self._closing = threading.Event()
         self.agents: Dict[str, _AgentSlot] = {}
         for spec in specs:
             self.agents[spec.name] = self._new_slot(spec)
@@ -328,6 +349,7 @@ class Hub:
 
         for slot in self._slots():
             self._start_worker(slot)
+        threading.Thread(target=self._watch_idle, name="landline-wakeup", daemon=True).start()
         self._write_run_file()
         logger.info(f"Hub {self.run_id} started with agents {list(self.agents)}")
 
@@ -468,6 +490,7 @@ class Hub:
         return new_run_id
 
     def stop(self):
+        self._closing.set()
         for slot in self._slots():
             slot.inbox.put(None)
             try:
@@ -703,6 +726,7 @@ class Hub:
                 slot.current = delivery
             slot.busy, slot.current_trigger = True, record["id"]
             slot.last_uuid, slot.turn_tools = None, 0
+            outcome = "finished"
             self._emit({"kind": "turn_start", "agent": slot.spec.name, "message_id": record["id"]})
             try:
                 attached = record.get("images") or []
@@ -716,16 +740,22 @@ class Hub:
                     reply_text = result.response or f"[{result.status}] {result.error or 'no response'}"
                     if slot.interrupted is delivery:
                         reply_text = "[interrupted by the user]" + (f"\n\n{result.response}" if result.response else "")
+                        outcome = "interrupted"
+                    elif result.status != "SUCCESS":
+                        outcome = f"failed: {result.error or result.status}"
                     delivery.reply = self._record(slot.spec.name, record["from"], reply_text, caused_by=record["id"])
                     self._checkpoint(slot, record, delivery.reply, result)
             except Exception as e:
                 logger.error(f"Agent {slot.spec.name} failed handling {record['id']}: {e}")
                 delivery.error = str(e)
+                outcome = f"failed: {e}"
             finally:
                 with slot.lock:
                     slot.current = None
                     if slot.interrupted is delivery:
                         slot.interrupted = None
+                slot.last_turn = {"message_id": record["id"], "from": record["from"], "outcome": outcome}
+                slot.idle_since = time.monotonic()
                 slot.busy, slot.current_trigger = False, None
                 self._emit({"kind": "idle", "agent": slot.spec.name})
                 delivery.done.set()
@@ -930,24 +960,30 @@ class Hub:
 
     # --------------------------------------------------------- permissions
 
-    def set_permissions(self, agent: str, manages: Any = None, spawns: Any = None) -> Dict[str, Any]:
+    KEEP = object()  # set_permissions: leave this setting as it is
+
+    def set_permissions(self, agent: str, manages: Any = None, spawns: Any = None, wakeup: Any = KEEP) -> Dict[str, Any]:
         """
-        Replaces `agent`'s `manages` and `spawns` settings while it runs; they take effect at once
-        and are saved in run.json. Its CLI only learns about added or removed tools when it starts,
-        so if the set of tools changes, the agent is restarted on its own conversation: now if it
-        is idle, else right after its current turn. Returns its list entry and when it restarts.
+        Replaces `agent`'s `manages` and `spawns` settings (and its `wakeup` rules, when given) while
+        it runs; they take effect at once and are saved in run.json. Its CLI only learns about added
+        or removed tools when it starts, so if the set of tools changes, the agent is restarted on its
+        own conversation: now if it is idle, else right after its current turn. Returns its list entry
+        and when it restarts.
         """
         slot = self.agents.get(agent)
         if slot is None:
             raise HubError(f"Unknown agent '{agent}'. Agents: {list(self.agents)}")
         try:
             new_manages, new_spawns = normalize_manages(manages), normalize_spawns(spawns)
+            new_wakeup = slot.spec.wakeup if wakeup is self.KEEP else normalize_wakeup(wakeup, agent)
         except ContextError as e:
             raise HubError(f"Agent '{agent}': {e}")
         if new_manages and agent in new_manages:
             raise HubError("An agent can't manage its own context.")
         tools_change = (bool(slot.spec.manages), bool(slot.spec.spawns)) != (bool(new_manages), bool(new_spawns))
-        slot.spec.manages, slot.spec.spawns = new_manages, new_spawns
+        if new_wakeup != slot.spec.wakeup:  # changed rules start over: they fire on the next idle stretch
+            self._wakeup_fired.pop(agent, None)
+        slot.spec.manages, slot.spec.spawns, slot.spec.wakeup = new_manages, new_spawns, new_wakeup
         restart = None
         if tools_change:
             restart = "after its turn" if slot.busy else "now"
@@ -958,7 +994,8 @@ class Hub:
         self._write_run_file()
         info = self._agent_info(slot)
         self._emit({"kind": "agent_updated", "agent": agent, "info": info, "restart": restart})
-        logger.info(f"Permissions of {agent} set (manages={new_manages}, spawns={new_spawns}, restart={restart})")
+        logger.info(f"Permissions of {agent} set (manages={new_manages}, spawns={new_spawns}, wakeup={new_wakeup}, "
+                    f"restart={restart})")
         return {"agent": info, "restart": restart}
 
     def _restart(self, agent: str) -> _AgentSlot:
@@ -970,6 +1007,71 @@ class Hub:
         if slot.session_id:
             self._emit({"kind": "session", "agent": agent, "session_id": slot.session_id, "model": self.model_in_use(slot)})
         return slot
+
+    # ------------------------------------------------------------- waking up
+
+    WAKEUP_TICK = 1.0  # seconds between checks of the wake-up rules
+
+    def _watch_idle(self):
+        while not self._closing.wait(self.WAKEUP_TICK):
+            try:
+                self.check_wakeups()
+            except Exception as e:
+                logger.error(f"Wake-up check failed: {e}")
+
+    @staticmethod
+    def _working(slot: _AgentSlot) -> bool:
+        return slot.busy or slot.inbox.qsize() > 0
+
+    def check_wakeups(self, now: Optional[float] = None) -> List[str]:
+        """
+        Sends each agent's wake-up message whose rule is met: every agent it watches is idle (nothing
+        running or queued), the last of them went idle at least `idle_for` seconds ago, and at least one
+        of them worked since the rule last fired. So a rule fires once per idle stretch, and never for a
+        team that hasn't done anything yet. Returns the agents woken up.
+        """
+        now = time.monotonic() if now is None else now
+        slots = {s.spec.name: s for s in self._slots()}
+        woken = []
+        for name, slot in slots.items():
+            for index, rule in enumerate(slot.spec.wakeup or []):
+                names = [n for n in slots if n != name] if rule["when"] == WAKEUP_ALL else rule["when"]
+                watched = [slots[n] for n in names if n in slots and n != name]
+                if not watched or any(self._working(s) for s in watched):
+                    continue
+                ended = [s.idle_since for s in watched if s.idle_since is not None]
+                # An idle stretch is known by when its last agent went idle; a rule fires once per stretch.
+                stretch = max(ended) if ended else None
+                if stretch is None or now - stretch < rule["idle_for"] \
+                        or stretch == self._wakeup_fired.get(name, {}).get(index):
+                    continue
+                self._wakeup_fired.setdefault(name, {})[index] = stretch
+                try:
+                    self.send(USER, name, self._wakeup_text(rule, watched, now), wait=False)
+                except HubError as e:  # e.g. it is being stopped
+                    logger.warning(f"Couldn't wake up {name}: {e}")
+                    continue
+                logger.info(f"Woke up {name}: {', '.join(s.spec.name for s in watched)} idle")
+                woken.append(name)
+        return woken
+
+    @staticmethod
+    def _wakeup_text(rule: Dict[str, Any], watched: List[_AgentSlot], now: float) -> str:
+        if rule["when"] == WAKEUP_ALL:
+            who = "All the other agents have"
+        else:
+            who = ", ".join(s.spec.name for s in watched) + (" have" if len(watched) > 1 else " has")
+        lines = [f"[wake-up: {who} been idle for {_duration(rule['idle_for'])} or more]", rule["message"].strip(), "",
+                 "Where each one stopped:"]
+        for s in watched:
+            turn = s.last_turn
+            if turn is None:
+                lines.append(f"- {s.spec.name}: hasn't handled a message yet")
+            else:
+                idle = f"idle {_duration(now - s.idle_since)}" if s.idle_since is not None else "idle"
+                lines.append(f"- {s.spec.name}: {idle}; its last turn, on {turn['message_id']} from {turn['from']}, "
+                             f"{turn['outcome']}")
+        return "\n".join(lines)
 
     # ------------------------------------------------- agents starting agents
 
@@ -1129,6 +1231,7 @@ class Hub:
             "forked_from": slot.spec.forked_from,
             "manages": slot.spec.manages,
             "spawns": slot.spec.spawns,
+            "wakeup": slot.spec.wakeup,
             "busy": slot.busy,
             "queued": slot.inbox.qsize(),
             "context": self.context_of(slot),
@@ -1153,8 +1256,8 @@ class Hub:
             "agents": {
                 name: {**{k: v for k, v in asdict(slot.spec).items()
                           if k not in ("name", "rewind", "last_context")
-                          and not (k in ("manages", "spawns", "spawned_by", "previous_sessions", "fork", "forked_from",
-                                         "context_window")
+                          and not (k in ("manages", "spawns", "wakeup", "spawned_by", "previous_sessions", "fork",
+                                         "forked_from", "context_window")
                                    and not v)},
                        # The folder the agent actually works in, even when the config left it
                        # to the hub's folder: resuming needs it (claude finds sessions by folder).
@@ -1185,7 +1288,8 @@ class Hub:
 #   {"op": "list"}
 #   {"op": "context", "from": "lead", "agent": "fixer", "action": "list" | "rewind", "after": "m7", "note": "..."}
 #   {"op": "team", "from": "lead", "action": "start" | "stop" | "sessions", "name": "fixer-2", ...}
-#   {"op": "permissions", "agent": "lead", "manages": {...} | null, "spawns": {...} | true | null}   (user only)
+#   {"op": "permissions", "agent": "lead", "manages": {...} | null, "spawns": {...} | true | null,
+#    "wakeup": [{"when": "all", "idle_for": 60, "message": "..."}] | null}   (user only; no "wakeup": unchanged)
 #   {"op": "messages"}
 #   {"op": "subscribe"}   -> streams events, one JSON line each, until disconnect
 # ---------------------------------------------------------------------------
@@ -1219,7 +1323,7 @@ class HubServer:
                         self._reply({"ok": True, **result})
                     elif op == "spawn":
                         fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id",
-                                                              "manages", "fork", "spawns")}
+                                                              "manages", "fork", "spawns", "wakeup")}
                         info = hub.spawn(AgentSpec.from_dict(request.get("name") or "", fields))
                         self._reply({"ok": True, "agent": info})
                     elif op == "stop":
@@ -1234,8 +1338,10 @@ class HubServer:
                         if (request.get("from") or USER) != USER:
                             self._reply({"ok": False, "error": "Only the user can change permissions."})
                         else:
+                            # Without a "wakeup" key, the agent's wake-up rules stay as they are.
+                            wakeup = request["wakeup"] if "wakeup" in request else Hub.KEEP
                             self._reply({"ok": True, **hub.set_permissions(request.get("agent") or "", request.get("manages"),
-                                                                            request.get("spawns"))})
+                                                                            request.get("spawns"), wakeup)})
                     elif op == "team":
                         caller, action = request.get("from") or USER, request.get("action")
                         if action == "start":
@@ -1358,18 +1464,21 @@ class HubClient:
 
     def spawn(self, name: str, backend: str, model: Optional[str] = None, effort: Optional[str] = None,
               cwd: Optional[str] = None, role: Optional[str] = None, session_id: Optional[str] = None,
-              manages: Any = None, fork: bool = False, spawns: Any = None) -> Dict[str, Any]:
+              manages: Any = None, fork: bool = False, spawns: Any = None, wakeup: Any = None) -> Dict[str, Any]:
         """
         Starts a new agent in the running hub, resuming `session_id` if given (or, with
         fork=True, starting on a copy of it); returns once it is up or failed.
         """
         return self.request({"op": "spawn", "name": name, "backend": backend, "model": model, "effort": effort,
                              "cwd": cwd, "role": role, "session_id": session_id, "manages": manages, "fork": fork,
-                             "spawns": spawns})
+                             "spawns": spawns, "wakeup": wakeup})
 
-    def set_permissions(self, agent: str, manages: Any = None, spawns: Any = None) -> Dict[str, Any]:
-        """Replaces an agent's `manages` and `spawns` settings (see Hub.set_permissions)."""
-        return self.request({"op": "permissions", "from": USER, "agent": agent, "manages": manages, "spawns": spawns})
+    def set_permissions(self, agent: str, manages: Any = None, spawns: Any = None, wakeup: Any = Hub.KEEP) -> Dict[str, Any]:
+        """Replaces an agent's `manages` and `spawns` settings, and its `wakeup` rules if given (see Hub.set_permissions)."""
+        payload = {"op": "permissions", "from": USER, "agent": agent, "manages": manages, "spawns": spawns}
+        if wakeup is not Hub.KEEP:
+            payload["wakeup"] = wakeup
+        return self.request(payload)
 
     def team(self, sender: str, action: str, **fields) -> Dict[str, Any]:
         """Agents starting agents: action 'start' (name, backend, ..., from_agent, after), 'stop' (name) or 'sessions' (query)."""
