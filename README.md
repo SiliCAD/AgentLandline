@@ -109,6 +109,9 @@ Add **AgentLandline** to your MCP client configuration file (e.g., `~/.gemini/an
 | `report_issue` | `title` *(str)*<br>`body` *(str)*<br>`label` *(str)*<br>`repo` *(str, default: 'SiliCAD/AgentLandline')*<br>`agent_model` *(str)*<br>`session_id` *(str)* | Creates a GitHub issue in the target repository (default: `SiliCAD/AgentLandline`) with formatted metadata, smart typography/typo label matching (`new_lable` <-> `new lable`), and auto-creation of missing labels with random colors. |
 | `message_agent` *(hub mode)* | `to` *(str)*<br>`text` *(str)*<br>`wait` *(bool, default: true)*<br>`images` *(list of paths, optional)* | Only in agents started by `landline up`. Sends a message to another agent (or `'user'`) through the hub and, with `wait`, returns its reply. `images` attaches image files (see [Images](#images)). |
 | `list_agents` *(hub mode)* | *None* | Only in agents started by `landline up`. Lists the other agents with their roles and busy state. |
+| `start_agent` *(hub mode)* | `name`, `role`, `backend`, `model`, `effort`<br>`session_id`, `fork`<br>`from_agent`, `after`<br>`cwd` | Only in agents with a `spawns` setting. Starts a new agent in the session: a new conversation, an existing session (continued, or copied with `fork`), or a copy of a teammate, optionally cut after one of its replies. See [Agents starting agents](#agents-starting-agents). |
+| `stop_agent` *(hub mode)* | `name` | Only with `spawns`. Stops an agent this agent started. |
+| `find_sessions` *(hub mode)* | `query`, `limit` | Only with `spawns`. Saved sessions on this machine, newest first, with their session ids. |
 | `manage_context` *(hub mode)* | `agent` *(str)*<br>`action` *(str: 'list' or 'rewind')*<br>`after` *(str, message id)*<br>`note` *(str, optional)* | Only in agents with a `manages` setting. `list` shows another agent's turns; `rewind` cuts its conversation back to just after its reply to message `after`. See [Managing another agent's context](#managing-another-agents-context). |
 
 ---
@@ -147,6 +150,7 @@ Per agent: `backend` (`claude`/`agy`, required), and optionally:
   the run continues the copy. claude forks with `--resume <id> --fork-session`; agy has no fork option,
   so the hub copies the conversation's files.
 - `manages`: the agents whose context this agent may manage (see below).
+- `spawns`: whether this agent may start agents of its own (see below).
 
 At the top level, `run` names the run (default: a timestamp).
 
@@ -218,6 +222,35 @@ point, so it carries less context and its turns are faster.
 - An agent can't be rewound while it is busy or has messages waiting. The person running the session
   can rewind any claude agent over the socket (`{"op": "context", "from": "user", …}`); they aren't
   limited by `manages`.
+
+<a id="agents-starting-agents"></a>**Agents starting agents.** An agent with `"spawns": true` (or rules, below) gets
+three more MCP tools:
+- `start_agent` starts a new agent in the session, which joins the team like any other. It can start:
+  - a new conversation (`name`, `role`, and optionally `backend`, `model`, `effort`);
+  - an existing session by id, continued (`session_id`), or copied with `fork: true` so the original
+    stays as it is. A session another running agent uses can only be copied;
+  - a copy of a teammate (`from_agent`), as it is now or cut just after its reply to message `after`.
+    The copy starts with the teammate's context (and its backend, model, effort and role unless given),
+    so it can try a different approach in parallel without a long briefing. This is the message-level
+    fork of a rewind, but the original keeps going.
+- `stop_agent` stops an agent it started.
+- `find_sessions` lists saved sessions on this machine (every run under `~/.agentlandline/runs/`),
+  newest first: run, agent, backend, model, role, folder, session id, and which running agent uses it.
+
+```json
+"lead": {"backend": "claude", "role": "…", "spawns": {"max": 2, "fork_from": ["fixer"]}}
+```
+
+| Setting | Values | Default |
+| :--- | :--- | :--- |
+| `max` | agents it started that may run at once | `3` |
+| `backends` | `claude`, `agy` | both |
+| `sessions` | may open existing sessions and use `find_sessions` | `true` |
+| `fork_from` | agents it may copy (`"*"`: any) | `["*"]` |
+| `stop` | may stop the agents it started | `true` |
+
+Started agents record `spawned_by` (and `forked_from` for copies) in run.json, so resuming the run brings
+them back. Copying an agy agent works only as it is now: agy conversations can't be cut at a message yet.
 
 <a id="images"></a>**Images.** A message can carry images (`.png`, `.jpg`, `.gif`, `.webp`, up to 20 MB each):
 `landline send coder "What's wrong with this plot?" --image plot.png`, the `images` argument of
