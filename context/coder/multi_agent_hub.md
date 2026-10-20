@@ -94,6 +94,16 @@ landline up run.json
   restarts it after the turn. Emits `agent_updated` (`info`, `restart`: now / after its turn / done).
   `_replace_slot(old, spec, doing, notice, keep_queue)` is the shared start-new-CLI-and-swap used by rewind
   (no queue allowed) and restart (queued deliveries move to the new slot).
+- **Wake-up rules**: `AgentSpec.wakeup` (`context.normalize_wakeup`: a list of `{when: "all" | [names],
+  idle_for: seconds, message}`). The worker stamps each slot's `idle_since` (monotonic) and `last_turn`
+  (`{message_id, from, outcome: finished | failed: <error> | interrupted}`) when a turn ends. A daemon thread
+  (`_watch_idle`, every `WAKEUP_TICK`, stopped by `_closing` in `stop()`) calls `check_wakeups()`: a rule
+  fires when every watched running agent has `not busy and inbox empty`, the stretch (latest `idle_since`)
+  is at least `idle_for` old, and it differs from the stretch that rule last fired for
+  (`_wakeup_fired[agent][index]`). Agents with no turn yet don't start a stretch, so fresh/resumed teams
+  never fire. The woken agent is excluded from its own `when`. It sends `_wakeup_text` from `user` with
+  `wait=False`. Changing an agent's rules (`set_permissions(..., wakeup=)`) clears its fired state;
+  `Hub.KEEP` (no `wakeup` key in the op) leaves them untouched. No new tools, so no restart.
 - **Images** (`images.py`): `send(..., images=[paths])` checks them (type, size), copies them to
   `runs/<run>/images/<random>-<name>`, and stores the copies' paths in the record (`images`). The worker
   passes them to ClaudePipeline.send(images=...), which adds base64 image blocks after the text
@@ -152,7 +162,7 @@ Copy the transcripts of runs worth keeping.
 
 The hub adds `agent` and `ts` to each one, and also emits `message` (a full log record), `turn_start`
 (`message_id`), `idle`, `agent_added` (`info`: the new agent's `list` entry), `agent_removed`, and
-`run_renamed` (`run`, `previous`), `agent_updated` (`info`, `restart`), `agent_rewound` (`to`, `by`, `dropped`, `session_id`, `previous_session`,
+`run_renamed` (`run`, `previous`), `agent_updated` (`info`, `restart`; `info` carries `wakeup`), `agent_rewound` (`to`, `by`, `dropped`, `session_id`, `previous_session`,
 `transcript`). The `session` event
 carries `model`: the model in use (claude reports it at startup; agy's comes from its settings). Live events are not persisted.
 
@@ -179,7 +189,8 @@ One JSON request line per connection, answered with one JSON line (`subscribe` k
 {"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "...", "manages": null, "fork": false}
 {"op": "team", "from": "lead", "action": "start", "name": "fixer-2", "from_agent": "fixer", "after": "m7", "role": "..."}
 {"op": "team", "from": "lead", "action": "sessions", "query": "opamp"}
-{"op": "permissions", "from": "user", "agent": "lead", "manages": {"fixer": {}}, "spawns": {"max": 2}}
+{"op": "permissions", "from": "user", "agent": "lead", "manages": {"fixer": {}}, "spawns": {"max": 2},
+ "wakeup": [{"when": "all", "idle_for": 60, "message": "..."}]}
 {"op": "context", "from": "lead", "agent": "fixer", "action": "list"}
 {"op": "context", "from": "lead", "agent": "fixer", "action": "rewind", "after": "m7", "note": "..."}
 {"op": "subscribe"}

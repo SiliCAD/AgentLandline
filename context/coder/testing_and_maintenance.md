@@ -16,6 +16,7 @@ tests/
 ├── test_events.py             # Unit: normalized live events for both CLIs
 ├── test_message_log.py        # Unit: messages.jsonl records
 ├── test_hub.py                # Unit: hub routing, caused_by chains, wait-cycle guard, socket API
+├── test_wakeup.py             # Unit: wake-up rules (idle watcher, settings, socket)
 ├── test_server_hub_mode.py    # Unit: message_agent / list_agents MCP tools
 ├── test_cli.py                # Unit: landline command and event printing
 ├── test_agy_pipeline.py       # Integration: Live multi-turn agy session bridge & memory
