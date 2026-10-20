@@ -12,7 +12,16 @@ consumer can render any agent's activity without knowing which CLI it runs:
     {"kind": "thinking",   "text": str}                    # may be "" when the CLI redacts it
     {"kind": "tool_start", "id": str, "name": str, "input": dict}
     {"kind": "tool_end",   "id": str, "ok": bool, "output": str}
-    {"kind": "turn_end",   "ok": bool, "duration_s": float, "usage": dict}
+    {"kind": "turn_end",   "ok": bool, "duration_s": float, "usage": dict,
+                           "context_windows": {model: int}}         # claude only, when it reports them
+    {"kind": "context",    "prompt": int, "output": int}           # tokens of the model call in progress
+    {"kind": "context",    "output": int}                          # claude: its output so far
+    {"kind": "compacted",  "trigger": str, "pre_tokens": int, "post_tokens": int}   # claude
+
+`context` events say how full the agent's context window is, live: claude's at the start
+of each model call (`message_start`) and as it writes (`message_delta`), agy's as each of
+its steps ends. The tokens in the window are prompt + output. Calls made by claude's own
+subagents (Task tool) are left out: they have their own context.
 
 These events are for live display only and are not persisted.
 """
@@ -47,11 +56,23 @@ def _normalize_claude(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
             event["model"] = raw["model"]
         return [event]
 
+    if kind == "system" and raw.get("subtype") == "compact_boundary":
+        meta = raw.get("compact_metadata") or {}
+        return [{"kind": "compacted", "trigger": meta.get("trigger"), "pre_tokens": meta.get("pre_tokens"),
+                 "post_tokens": meta.get("post_tokens")}]
+
     if kind == "stream_event":
         event = raw.get("event") or {}
         delta = event.get("delta") or {}
         if event.get("type") == "content_block_delta" and delta.get("type") == "text_delta" and delta.get("text"):
             return [{"kind": "text_delta", "text": delta["text"]}]
+        if raw.get("parent_tool_use_id"):  # a subagent's call: not this agent's context
+            return []
+        if event.get("type") == "message_start":
+            usage = (event.get("message") or {}).get("usage") or {}
+            return [{"kind": "context", "prompt": _prompt_tokens(usage), "output": usage.get("output_tokens") or 0}]
+        if event.get("type") == "message_delta" and (event.get("usage") or {}).get("output_tokens") is not None:
+            return [{"kind": "context", "output": event["usage"]["output_tokens"]}]
         return []
 
     if kind == "assistant":
@@ -77,14 +98,24 @@ def _normalize_claude(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         return out
 
     if kind == "result":
-        return [{
+        event = {
             "kind": "turn_end",
             "ok": not raw.get("is_error"),
             "duration_s": (raw.get("duration_ms") or 0) / 1000.0,
             "usage": raw.get("usage") or {},
-        }]
+        }
+        windows = {model: info["contextWindow"] for model, info in (raw.get("modelUsage") or {}).items()
+                   if isinstance(info, dict) and isinstance(info.get("contextWindow"), int)}
+        if windows:
+            event["context_windows"] = windows
+        return [event]
 
     return []
+
+
+def _prompt_tokens(usage: Dict[str, Any]) -> int:
+    """claude: what a model call was sent, cached or not. That is what fills the context window."""
+    return sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
 
 
 def _normalize_agy(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -98,8 +129,17 @@ def _normalize_agy(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         step_type, state = step.get("step_type"), step.get("state")
         step_id = str(step.get("step_index"))
 
-        if step_type == "agent_response" and step.get("text_delta"):
-            return [{"kind": "text_delta", "text": step["text_delta"]}]
+        if step_type == "agent_response":
+            out = [{"kind": "text_delta", "text": step["text_delta"]}] if step.get("text_delta") else []
+            if state == "DONE" and isinstance(step.get("usage"), dict):  # the last step can carry text too
+                # This step's model call (the turn's result is a running sum). input_tokens leaves out
+                # what came from agy's prompt cache, so after the first turns most of the context is
+                # in cache_read_tokens: the prompt is both.
+                usage = step["usage"]
+                out.append({"kind": "context", "prompt": (usage.get("input_tokens") or 0) + (usage.get("cache_read_tokens") or 0),
+                            "output": usage.get("output_tokens") or 0})
+            if out:
+                return out
 
         if step_type == "tool":
             info = step.get("tool_info") or {}
