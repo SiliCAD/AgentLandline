@@ -77,6 +77,17 @@ landline up run.json
     the cut, and the original session file is unchanged. agy isn't supported (REWIND_BACKENDS); its
     conversations can be cut by deleting `steps` rows from a copy of its SQLite file, but that format is
     private.
+- **Images** (`images.py`): `send(..., images=[paths])` checks them (type, size), copies them to
+  `runs/<run>/images/<random>-<name>`, and stores the copies' paths in the record (`images`). The worker
+  passes them to ClaudePipeline.send(images=...), which adds base64 image blocks after the text
+  (≤ 5 MB each). agy's stream-json input refuses non-text blocks ("only text"), so `_frame` appends the
+  paths and asks the agent to open them with its file viewing tool (agy's `view_file` reads images).
+- **Forking at start**: `AgentSpec.fork` (with `session_id`). `_new_slot` creates the pipeline with
+  `spec.rewind = {session_id: <new uuid>}` and no cut point. For claude that's
+  `--resume <base> --fork-session --session-id <new>`. For agy, `AgyPipeline.fork_conversation` copies
+  `conversations/<base>.db` (plus `-wal`/`-shm`) and `brain/<base>/` to the new id. The slot gets a copy
+  of the spec with the new `session_id`, `fork: false` and `forked_from: <base>`, so run.json resumes the
+  copy rather than forking again.
 - Sending to `'user'` only records the message, since there is no inbox to deliver it to.
 - **Wait-cycle guard**: the hub tracks which agent is waiting on which. If A is waiting on B and B
   tries to wait on A (directly or through a longer chain), B gets a `HubError` explaining the
@@ -142,13 +153,13 @@ carries `model`: the model in use (claude reports it at startup; agy's comes fro
 One JSON request line per connection, answered with one JSON line (`subscribe` keeps streaming):
 
 ```json
-{"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true, "timeout": null}
+{"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true, "timeout": null, "images": ["/abs/plot.png"]}
 {"op": "list"}
 {"op": "messages"}
 {"op": "stop", "name": "reviewer"}
 {"op": "rename", "run": "opamp-review"}
 {"op": "adopt", "run": "run-20261012-022025-7b62"}
-{"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "...", "manages": null}
+{"op": "spawn", "name": "reviewer", "backend": "claude", "model": null, "effort": null, "cwd": null, "role": "...", "manages": null, "fork": false}
 {"op": "context", "from": "lead", "agent": "fixer", "action": "list"}
 {"op": "context", "from": "lead", "agent": "fixer", "action": "rewind", "after": "m7", "note": "..."}
 {"op": "subscribe"}

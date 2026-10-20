@@ -8,6 +8,8 @@ import sys
 import json
 import time
 import queue
+import shutil
+import sqlite3
 import logging
 import threading
 import subprocess
@@ -139,6 +141,9 @@ class AgyPipeline:
         self._running = True
 
         init_ready = threading.Event()
+        # agy reports a bad start (e.g. a model/effort combination it rejects) as a `result`
+        # event before any `init`, then exits: fail with its message instead of waiting.
+        startup_error: List[str] = []
 
         def _reader():
             while self._running and self.proc and self.proc.stdout:
@@ -160,6 +165,9 @@ class AgyPipeline:
                     logger.warning(f"Failed to parse json line from agy: {line_str}")
                     continue
 
+                if not init_ready.is_set() and event_data.get("event") == "result":
+                    startup_error.append((event_data.get("result") or {}).get("error") or "agy ended before starting")
+                    break
                 self._handle_event(event_data, init_ready)
 
             self._running = False
@@ -170,9 +178,14 @@ class AgyPipeline:
         self._reader_thread.start()
 
         # Wait for init event
-        if not init_ready.wait(timeout=timeout):
-            self.close()
-            raise TimeoutError(f"Timed out waiting for agy init event (conversation_id={self.resume_conversation_id}).")
+        deadline = time.monotonic() + timeout
+        while not init_ready.wait(timeout=0.1):
+            if startup_error or not self._reader_thread.is_alive():
+                self.close()
+                raise RuntimeError(f"agy didn't start: {startup_error[0] if startup_error else 'it exited'}")
+            if time.monotonic() > deadline:
+                self.close()
+                raise TimeoutError(f"Timed out waiting for agy init event (conversation_id={self.resume_conversation_id}).")
 
     def _handle_event(self, event: Dict[str, Any], init_ready: threading.Event):
         event_type = event.get("event")
@@ -241,6 +254,31 @@ class AgyPipeline:
                 self._current_turn_result.error = result_data.get("error")
 
             self._turn_done_event.set()
+
+    @staticmethod
+    def fork_conversation(parent_id: str, new_id: str) -> str:
+        """
+        Copies agy conversation `parent_id` to a new conversation `new_id` (its SQLite
+        file, with any pending write-ahead log, and its brain folder) and returns
+        `new_id`. The original is only read, so it may be in use. agy has no fork
+        option of its own; resuming the copy with --conversation continues it.
+        """
+        cli_dir = os.path.expanduser("~/.gemini/antigravity-cli")
+        parent_db = os.path.join(cli_dir, "conversations", f"{parent_id}.db")
+        if not os.path.exists(parent_db):
+            raise FileNotFoundError(f"Conversation '{parent_id}' not found in {cli_dir}/conversations/")
+        fork_db = os.path.join(cli_dir, "conversations", f"{new_id}.db")
+        if os.path.exists(fork_db):
+            raise FileExistsError(f"Conversation '{new_id}' already exists.")
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(parent_db + suffix):
+                shutil.copy2(parent_db + suffix, fork_db + suffix)
+        with sqlite3.connect(fork_db) as conn:
+            conn.execute("UPDATE trajectory_meta SET cascade_id = ?;", (new_id,))
+        parent_brain = os.path.join(cli_dir, "brain", parent_id)
+        if os.path.isdir(parent_brain):
+            shutil.copytree(parent_brain, os.path.join(cli_dir, "brain", new_id), dirs_exist_ok=True)
+        return new_id
 
     @staticmethod
     def transcript_path_for(conversation_id: Optional[str]) -> Optional[str]:

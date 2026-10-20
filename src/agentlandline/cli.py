@@ -139,7 +139,8 @@ def cmd_up(args) -> int:
 
 
 def cmd_send(args) -> int:
-    res = HubClient(args.socket).send(args.sender, args.agent, " ".join(args.text), wait=not args.no_wait)
+    res = HubClient(args.socket).send(args.sender, args.agent, " ".join(args.text), wait=not args.no_wait,
+                                      images=args.image)
     if not res.get("ok"):
         print(f"landline: {res.get('error')}", file=sys.stderr)
         return 1
@@ -153,7 +154,7 @@ def cmd_send(args) -> int:
 def cmd_spawn(args) -> int:
     print(f"Starting {args.name}…", flush=True)
     res = HubClient(args.socket).spawn(args.name, args.backend, model=args.model, effort=args.effort,
-                                       cwd=args.cwd, role=args.role, session_id=args.session)
+                                       cwd=args.cwd, role=args.role, session_id=args.session, fork=args.fork)
     if not res.get("ok"):
         print(f"landline: {res.get('error')}", file=sys.stderr)
         return 1
@@ -226,6 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("text", nargs="+")
     send.add_argument("--from", dest="sender", default="user", help="Sender name (default: user)")
     send.add_argument("--no-wait", action="store_true", help="Return once queued instead of waiting for the reply")
+    send.add_argument("--image", action="append", metavar="PATH", help="Attach an image file (repeatable)")
     send.set_defaults(func=cmd_send)
 
     spawn = sub.add_parser("spawn", help="Start another agent in the running hub")
@@ -236,6 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     spawn.add_argument("--cwd", help="Working folder (default: where the hub was started)")
     spawn.add_argument("--role", help="What this agent is for; the others are told")
     spawn.add_argument("--session", help="Resume this CLI session id instead of starting a new conversation")
+    spawn.add_argument("--fork", action="store_true", help="With --session: start on a copy of that session, leaving it as it is")
     spawn.set_defaults(func=cmd_spawn)
 
     stop = sub.add_parser("stop", help="Stop one agent in the running hub")

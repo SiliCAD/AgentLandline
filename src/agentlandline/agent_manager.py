@@ -7,8 +7,6 @@ drive either the Antigravity (agy) or Claude Code (claude) backend via `backend=
 import os
 import json
 import time
-import shutil
-import sqlite3
 import logging
 from typing import Optional, Dict, Any, List, Union
 from .agy_pipeline import AgyPipeline, AgentTurnResult
@@ -34,25 +32,7 @@ class AgentManager:
         """
         Forks an existing agy conversation session into a new conversation ID.
         """
-        fork_id = new_id or f"fork-{int(time.time())}"
-        cli_dir = os.path.expanduser("~/.gemini/antigravity-cli")
-
-        parent_db = os.path.join(cli_dir, "conversations", f"{parent_id}.db")
-        if not os.path.exists(parent_db):
-            raise FileNotFoundError(f"Conversation '{parent_id}' not found in {cli_dir}/conversations/")
-
-        # 1. Clone DB and update internal cascade_id
-        fork_db = os.path.join(cli_dir, "conversations", f"{fork_id}.db")
-        shutil.copy2(parent_db, fork_db)
-        with sqlite3.connect(fork_db) as conn:
-            conn.execute("UPDATE trajectory_meta SET cascade_id = ?;", (fork_id,))
-
-        # 2. Clone brain artifacts directory if present
-        parent_brain = os.path.join(cli_dir, "brain", parent_id)
-        if os.path.isdir(parent_brain):
-            shutil.copytree(parent_brain, os.path.join(cli_dir, "brain", fork_id), dirs_exist_ok=True)
-
-        return fork_id
+        return AgyPipeline.fork_conversation(parent_id, new_id or f"fork-{int(time.time())}")
 
     def initialize(
         self,

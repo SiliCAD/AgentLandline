@@ -36,6 +36,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
 from .context import Checkpoints, ContextError, REWIND_BACKENDS, normalize_manages, rules_for
+from . import images as image_files
 from .events import normalize, agy_completed_step, agy_step_thinking
 from .message_log import MessageLog, count_lines
 from .pipeline_factory import normalize_backend
@@ -84,6 +85,11 @@ class AgentSpec:
     cwd: Optional[str] = None
     role: Optional[str] = None
     session_id: Optional[str] = None  # resume an existing CLI session
+    # With session_id: start on a copy of that session instead of continuing it, so the
+    # agent begins with its context and the original stays as it is.
+    fork: bool = False
+    # The session this agent was forked from (set by the hub; kept in run.json).
+    forked_from: Optional[str] = None
     # Agents whose context this agent may manage (agentlandline.context), in full form.
     manages: Optional[Dict[str, Dict[str, Any]]] = None
     # Sessions this agent had before it was rewound, newest last.
@@ -103,6 +109,10 @@ class AgentSpec:
             spec.manages = normalize_manages(data.get("manages"))
         except ContextError as e:
             raise HubError(f"Agent '{name}': {e}")
+        spec.fork = bool(data.get("fork"))
+        if spec.fork and not spec.session_id:
+            raise HubError(f"Agent '{name}': 'fork' needs the 'session_id' of the session to fork.")
+        spec.forked_from = data.get("forked_from")
         previous = data.get("previous_sessions") or []
         spec.previous_sessions = [str(s) for s in previous] if isinstance(previous, list) else []
         try:
@@ -167,6 +177,8 @@ class _AgentSlot:
         self.last_uuid: Optional[str] = None  # claude: the last assistant message of the running turn
         self.turn_tools = 0                   # tool calls in the running turn
         self.notice: Optional[str] = None     # put in front of the next message delivered to it
+        # Started on an existing conversation (resumed or forked), so it already knows things.
+        self.has_history = bool(spec.session_id or spec.forked_from)
 
     @property
     def session_id(self) -> Optional[str]:
@@ -212,6 +224,16 @@ class Hub:
         env = {"LANDLINE_AGENT": spec.name, "LANDLINE_SOCKET": self.socket_path, "LANDLINE_RUN": self.run_id}
         if spec.manages:
             env["LANDLINE_MANAGES"] = "1"  # the agent gets the manage_context tool
+        if spec.fork:
+            # The pipeline starts on a copy of spec.session_id; from then on the agent is that copy,
+            # so run.json (and resuming the run) continues the fork rather than forking again.
+            spec = replace(spec, rewind={"session_id": str(uuid.uuid4())}, forked_from=spec.session_id)
+            try:
+                pipeline = self._pipeline_factory(spec, env)
+            except (OSError, ValueError) as e:
+                raise HubError(f"Couldn't fork session {spec.session_id} for '{spec.name}': {e}")
+            spec = replace(spec, session_id=pipeline.conversation_id or spec.rewind["session_id"], fork=False, rewind=None)
+            return _AgentSlot(spec, pipeline)
         return _AgentSlot(spec, self._pipeline_factory(spec, env))
 
     def _slots(self) -> List[_AgentSlot]:
@@ -233,8 +255,13 @@ class Hub:
                                   conversation_id=spec.session_id, extra_env=env, stream_partial=True,
                                   fork_session=bool(rewind), fork_session_id=rewind.get("session_id"),
                                   resume_at=rewind.get("at"))
+        session = spec.session_id
+        if spec.rewind:
+            if spec.rewind.get("at"):
+                raise HubError("agy conversations can't be cut at a message yet.")
+            session = AgyPipeline.fork_conversation(spec.session_id, spec.rewind["session_id"])
         return AgyPipeline(cwd=spec.cwd, model=spec.model, effort=spec.effort,
-                           conversation_id=spec.session_id, extra_env=env)
+                           conversation_id=session, extra_env=env)
 
     # claude stays silent until its first prompt, so its start() always waits out
     # the timeout; a short one is enough to catch a process that dies on launch.
@@ -458,12 +485,15 @@ class Hub:
 
     # -------------------------------------------------------------- messaging
 
-    def send(self, sender: str, to: str, text: str, wait: bool = True, timeout: Optional[float] = None) -> Dict[str, Any]:
+    def send(self, sender: str, to: str, text: str, wait: bool = True, timeout: Optional[float] = None,
+             images: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Sends `text` from `sender` (an agent name or 'user') to agent `to`.
         With wait=True, blocks until `to` has finished the turn this message
         starts and returns its reply; otherwise returns once it is queued.
         Sending to 'user' just records the message (there is no inbox to deliver to).
+        `images` are image file paths; they're copied into the run and attached
+        (agentlandline.images).
         """
         if sender != USER and sender not in self.agents:
             raise HubError(f"Unknown sender '{sender}'.")
@@ -471,13 +501,18 @@ class Hub:
             raise HubError(f"Unknown agent '{to}'. Agents: {list(self.agents)}")
         if to == sender:
             raise HubError("An agent can't message itself.")
-        if not text or not text.strip():
+        try:
+            attached = image_files.check(images or [])
+        except image_files.ImageError as e:
+            raise HubError(f"Can't attach image: {e}")
+        if (not text or not text.strip()) and not attached:
             raise HubError("Message text is empty.")
+        text = text or ""
 
         if wait and to != USER and sender != USER:
             self._check_wait_cycle(sender, to)
 
-        record = self._record(sender, to, text)
+        record = self._record(sender, to, text, images=image_files.store(self.run_dir, attached) if attached else None)
         if to == USER:
             return {"status": "DELIVERED", "message": record}
 
@@ -517,7 +552,8 @@ class Hub:
                         f"deadlock. Put your answer in your reply instead, or send with wait=false."
                     )
 
-    def _record(self, sender: str, to: str, text: str, caused_by: Optional[str] = None) -> Dict[str, Any]:
+    def _record(self, sender: str, to: str, text: str, caused_by: Optional[str] = None,
+                images: Optional[List[str]] = None) -> Dict[str, Any]:
         session = transcript = None
         if sender != USER:
             slot = self.agents[sender]
@@ -525,7 +561,8 @@ class Hub:
             transcript = slot.pipeline.transcript_path()
             if caused_by is None:
                 caused_by = slot.current_trigger
-        record = self.log.append(sender, to, text, caused_by=caused_by, from_session=session, from_transcript=transcript)
+        record = self.log.append(sender, to, text, caused_by=caused_by, from_session=session, from_transcript=transcript,
+                                 images=images)
         self._emit({"kind": "message", **record})
         return record
 
@@ -539,7 +576,11 @@ class Hub:
             slot.last_uuid, slot.turn_tools = None, 0
             self._emit({"kind": "turn_start", "agent": slot.spec.name, "message_id": record["id"]})
             try:
-                result = slot.pipeline.send(self._frame(slot, record), timeout=None)
+                attached = record.get("images") or []
+                if attached and slot.spec.backend == "claude":
+                    result = slot.pipeline.send(self._frame(slot, record), timeout=None, images=attached)
+                else:
+                    result = slot.pipeline.send(self._frame(slot, record), timeout=None)
                 if slot.stopping:
                     delivery.error = f"Agent '{slot.spec.name}' was stopped before replying."
                 else:
@@ -560,7 +601,10 @@ class Hub:
 
     def _frame(self, slot: _AgentSlot, record: Dict[str, Any]) -> str:
         notice, slot.notice = slot.notice, None
-        return (notice or "") + self._frame_message(slot, record)
+        attached = record.get("images") or []
+        inline = slot.spec.backend == "claude" and all(
+            os.path.getsize(p) <= image_files.MAX_INLINE_BYTES for p in attached if os.path.exists(p))
+        return (notice or "") + self._frame_message(slot, record) + image_files.note(attached, inline)
 
     def _frame_message(self, slot: _AgentSlot, record: Dict[str, Any]) -> str:
         header = f"[landline message {record['id']} from {record['from']}]\n"
@@ -578,6 +622,8 @@ class Hub:
         slot.introduced = True
         slot.known_agents = {s.spec.name for s in others_now}
         others = "\n".join(self._describe(s) for s in others_now)
+        earlier = ("This conversation continues earlier work (above): keep using what you know from it.\n"
+                   if slot.has_history else "")
         intro = (
             f"You are agent '{slot.spec.name}' in a multi-agent session."
             + (f" Your role: {slot.spec.role}" if slot.spec.role else "")
@@ -585,7 +631,8 @@ class Hub:
             "Messages to you arrive with a [landline message <id> from <sender>] header. Just do what the "
             "message asks and answer in your response: your final response is delivered back to the sender "
             "automatically, so don't use a tool to reply. To ask another agent something yourself, call the "
-            "agent-landline `message_agent` tool with `to` and `text`; it returns their reply.\n\n"
+            "agent-landline `message_agent` tool with `to` and `text`; it returns their reply.\n"
+            + earlier + "\n"
         )
         return intro + header + record["text"]
 
@@ -764,7 +811,8 @@ class Hub:
             "messages": self.log.path,
             "agents": {
                 name: {**{k: v for k, v in asdict(slot.spec).items()
-                          if k not in ("name", "rewind") and not (k in ("manages", "previous_sessions") and not v)},
+                          if k not in ("name", "rewind")
+                          and not (k in ("manages", "previous_sessions", "fork", "forked_from") and not v)},
                        # The folder the agent actually works in, even when the config left it
                        # to the hub's folder: resuming needs it (claude finds sessions by folder).
                        "cwd": slot.spec.cwd or getattr(slot.pipeline, "cwd", None),
@@ -788,7 +836,7 @@ class Hub:
 
 # ---------------------------------------------------------------------------
 # Local socket API: one JSON request line per connection, JSON response line(s).
-#   {"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true}
+#   {"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true, "images": ["/path/plot.png"]}
 #   {"op": "list"}
 #   {"op": "context", "from": "lead", "agent": "fixer", "action": "list" | "rewind", "after": "m7", "note": "..."}
 #   {"op": "messages"}
@@ -819,10 +867,12 @@ class HubServer:
                 try:
                     if op == "send":
                         result = hub.send(request.get("from") or USER, request.get("to") or "", request.get("text") or "",
-                                          wait=request.get("wait", True), timeout=request.get("timeout"))
+                                          wait=request.get("wait", True), timeout=request.get("timeout"),
+                                          images=request.get("images"))
                         self._reply({"ok": True, **result})
                     elif op == "spawn":
-                        fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id", "manages")}
+                        fields = {k: request.get(k) for k in ("backend", "model", "effort", "cwd", "role", "session_id",
+                                                              "manages", "fork")}
                         info = hub.spawn(AgentSpec.from_dict(request.get("name") or "", fields))
                         self._reply({"ok": True, "agent": info})
                     elif op == "stop":
@@ -913,8 +963,13 @@ class HubClient:
             raise HubError("Hub closed the connection without replying.")
         return json.loads(line)
 
-    def send(self, sender: str, to: str, text: str, wait: bool = True, timeout: Optional[float] = None) -> Dict[str, Any]:
-        return self.request({"op": "send", "from": sender, "to": to, "text": text, "wait": wait, "timeout": timeout})
+    def send(self, sender: str, to: str, text: str, wait: bool = True, timeout: Optional[float] = None,
+             images: Optional[List[str]] = None) -> Dict[str, Any]:
+        """`images`: image file paths to attach (absolute, or relative to this process's folder)."""
+        payload = {"op": "send", "from": sender, "to": to, "text": text, "wait": wait, "timeout": timeout}
+        if images:
+            payload["images"] = [os.path.abspath(os.path.expanduser(p)) for p in images]
+        return self.request(payload)
 
     def list_agents(self) -> Dict[str, Any]:
         return self.request({"op": "list"})
@@ -931,10 +986,13 @@ class HubClient:
 
     def spawn(self, name: str, backend: str, model: Optional[str] = None, effort: Optional[str] = None,
               cwd: Optional[str] = None, role: Optional[str] = None, session_id: Optional[str] = None,
-              manages: Any = None) -> Dict[str, Any]:
-        """Starts a new agent in the running hub (resuming `session_id` if given); returns once it is up or failed."""
-        return self.request({"op": "spawn", "name": name, "backend": backend, "model": model,
-                             "effort": effort, "cwd": cwd, "role": role, "session_id": session_id, "manages": manages})
+              manages: Any = None, fork: bool = False) -> Dict[str, Any]:
+        """
+        Starts a new agent in the running hub, resuming `session_id` if given (or, with
+        fork=True, starting on a copy of it); returns once it is up or failed.
+        """
+        return self.request({"op": "spawn", "name": name, "backend": backend, "model": model, "effort": effort,
+                             "cwd": cwd, "role": role, "session_id": session_id, "manages": manages, "fork": fork})
 
     def context(self, sender: str, agent: str, action: str = "list", after: Optional[str] = None,
                 note: Optional[str] = None) -> Dict[str, Any]:
