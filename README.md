@@ -250,7 +250,16 @@ three more MCP tools:
 | `stop` | may stop the agents it started | `true` |
 
 Started agents record `spawned_by` (and `forked_from` for copies) in run.json, so resuming the run brings
-them back. Copying an agy agent works only as it is now: agy conversations can't be cut at a message yet.
+them back.
+
+**Changing permissions while a session runs.** `manages` and `spawns` can be changed for a running agent
+(socket op `permissions`, used by MultiMind's `!permission`; only `from: "user"` is accepted). The new rules
+apply at once and are saved in run.json. An agent's CLI only learns which tools it has when it starts, so
+when a change gives it tools or takes them away (`manage_context`, `start_agent` and the rest), the hub
+restarts its CLI on its own conversation: right away if it's idle, or right after its current turn, with
+messages waiting for it kept. Changing only the rules (a limit, which agents, notes) needs no restart.
+This is not a security boundary: agents run commands without prompts, so an agent could reach the hub's
+socket itself. Copying an agy agent works only as it is now: agy conversations can't be cut at a message yet.
 
 <a id="images"></a>**Images.** A message can carry images (`.png`, `.jpg`, `.gif`, `.webp`, up to 20 MB each):
 `landline send coder "What's wrong with this plot?" --image plot.png`, the `images` argument of
