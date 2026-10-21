@@ -56,7 +56,7 @@ def initialize_agent(
         cwd: Working directory path for the agent process (optional).
         fork: Whether to fork the conversation into a new session (optional).
         new_conversation_id: Optional custom conversation ID for the fork (Antigravity only; Claude Code assigns its own forked session ID).
-        backend: Which agent CLI to drive: 'antigravity'/'agy' (default) or 'claude'/'claude-code'.
+        backend: Which agent CLI to drive: 'antigravity'/'agy' (default), 'claude', or 'codex'.
         model: Optional model name/alias to pass through to the backend CLI.
         effort: Optional reasoning effort level to pass through to the backend CLI.
     """
@@ -257,10 +257,10 @@ def start_agent(name: str, role: str = "", backend: str = "", model: str = "", e
     Args:
         name: Name for the new agent (letters, digits, - or _), e.g. 'fixer-2'.
         role: What it is for; the other agents are told.
-        backend: 'claude' or 'agy' (default: claude, or the copied agent's).
+        backend: 'claude', 'agy', or 'codex' (default: claude, or the copied agent's).
         model: Model for its CLI (default: the CLI's own, or the copied agent's).
         effort: Reasoning effort (default: the CLI's own, or the copied agent's).
-        session_id: An existing claude/agy session to open.
+        session_id: An existing claude/agy/codex session to open.
         fork: With session_id: start on a copy of it instead of continuing it.
         from_agent: A teammate to copy.
         after: With from_agent: the message id whose reply the copy is cut after.

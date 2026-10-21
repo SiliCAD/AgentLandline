@@ -41,10 +41,60 @@ def _clip(value: Any) -> str:
 
 
 def normalize(backend: str, raw: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Maps one raw stream-json event from `backend` ('claude' or 'antigravity') to normalized events."""
+    """Maps a raw Claude, Antigravity, or Codex event to shared live events."""
     if backend == "claude":
         return _normalize_claude(raw)
+    if backend == "codex":
+        return _normalize_codex(raw)
     return _normalize_agy(raw)
+
+
+def _normalize_codex(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    kind = raw.get("type")
+    if kind == "thread.started":
+        return [{"kind": "session", "session_id": raw.get("thread_id")}]
+    if kind in ("turn.completed", "turn.failed"):
+        return [{"kind": "turn_end", "ok": kind == "turn.completed", "duration_s": 0,
+                 "usage": raw.get("usage") or {}}]
+    if kind == "codex.context":
+        info = raw.get("info") or {}
+        usage = info.get("last_token_usage") or {}
+        out = []
+        if raw.get("model"):
+            out.append({"kind": "session", "model": raw["model"]})
+        if usage:
+            context = {"kind": "context", "prompt": usage.get("input_tokens") or 0,
+                       "output": usage.get("output_tokens") or 0}
+            if raw.get("model") and info.get("model_context_window"):
+                context["context_windows"] = {raw["model"]: info["model_context_window"]}
+            out.append(context)
+        return out
+    if kind not in ("item.started", "item.completed"):
+        return []
+    item = raw.get("item") or {}
+    item_type = item.get("type")
+    completed = kind == "item.completed"
+    if item_type in ("agent_message", "reasoning"):
+        if completed and item.get("text"):
+            return [{"kind": "text" if item_type == "agent_message" else "thinking", "text": item["text"]}]
+        return []
+    if item_type not in ("command_execution", "mcp_tool_call", "file_change", "web_search"):
+        return []
+    name = item.get("tool") or item_type
+    args = item.get("arguments") or {k: item[k] for k in ("command", "changes", "query") if k in item}
+    if not isinstance(args, dict):
+        args = {"arguments": args}
+    start = {"kind": "tool_start", "id": item.get("id"), "name": name, "input": args}
+    if not completed:
+        return [] if item_type in ("file_change", "web_search") else [start]
+    result = item.get("result") or {}
+    tool_error = isinstance(result, dict) and result.get("isError")
+    ok = (item.get("status") not in ("failed", "declined") and not item.get("error")
+          and not tool_error and item.get("exit_code") in (None, 0))
+    output = item.get("error") or item.get("aggregated_output") or item.get("result") or ""
+    end = {"kind": "tool_end", "id": item.get("id"), "ok": ok, "output": _clip(output)}
+    # File changes and web searches may only have a completed event.
+    return [start, end] if item_type in ("file_change", "web_search") else [end]
 
 
 def _normalize_claude(raw: Dict[str, Any]) -> List[Dict[str, Any]]:

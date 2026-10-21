@@ -1,15 +1,15 @@
 # AgentLandline 📞
 
-**AgentLandline** is an Model Context Protocol (MCP) server and Python backend engine that provides a direct, programmatic "landline" connection to running headless agent CLI sessions — **Antigravity CLI (`agy`)** and **Claude Code CLI (`claude`)**.
+**AgentLandline** is an Model Context Protocol (MCP) server and Python backend engine that provides a direct, programmatic "landline" connection to running headless agent CLI sessions — **Antigravity CLI (`agy`)**, **Claude Code CLI (`claude`)**, and **OpenAI Codex CLI (`codex`)**.
 
-It allows external AI agents (such as Antigravity IDE, Claude Code, Cursor, or custom tools) to headlessly initialize, send prompts to, monitor, and control `agy` or `claude` agent sessions with full multi-turn conversational context, tool execution tracking, and automated GitHub issue reporting.
+It allows external AI agents (such as Antigravity IDE, Claude Code, Cursor, or custom tools) to headlessly initialize, send prompts to, monitor, and control `agy`, `claude`, or `codex` agent sessions with full multi-turn conversational context, tool execution tracking, and automated GitHub issue reporting.
 
 ---
 
 ## ✨ Features
 
 - **🔌 MCP Server Integration**: Exposes clean, standardized MCP tools using [FastMCP](https://github.com/jlowin/fastmcp) for easy integration into any MCP-compatible environment.
-- **🧩 Multi-Backend Pipelines**: Drives either the Antigravity (`agy`) or Claude Code (`claude`) CLI through the same manager interface, selected per-session via `backend=`.
+- **🧩 Multi-Backend Pipelines**: Drives Antigravity (`agy`), Claude Code (`claude`), or Codex (`codex`) through the same manager interface, selected per-session via `backend=`.
 - **🔄 Multi-Turn Session Orchestration**: Seamlessly resumes and maintains agent conversation sessions using background streaming JSON subprocess communication.
 - **📊 Real-time Status & Transcript Monitoring**: Inspect live process health, streaming output buffers, and per-backend on-disk transcripts.
 - **👥 Multi-Agent Sessions (`landline`)**: Run several named agents side by side (any mix of `agy` and `claude`), let them message each other through a hub, step in with your own messages, and follow everything live from a terminal. Every message is recorded with who sent it to whom and a link to the sender's own CLI transcript.
@@ -58,6 +58,37 @@ See [`context/coder/pipeline_backends.md`](context/coder/pipeline_backends.md) f
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
+
+For Codex, install [Codex CLI](https://developers.openai.com/codex/cli) 0.149.0 or later and run
+`codex login`. The backend uses your saved CLI login and does not inherit `OPENAI_API_KEY` or
+`CODEX_API_KEY` from the parent process. `$CODEX_HOME` is respected. Backend aliases: `codex`,
+`codex-cli`, `openai`.
+
+Use `"backend": "codex"` in a run config, `landline spawn codex coder`, or
+`AgentManager.initialize(conversation_id="<thread-id>", backend="codex")`. Leave `model` out to
+use the CLI's configured model, or pass an account-supported model id. `effort` maps to
+`model_reasoning_effort`. Hub agents skip permission prompts, as with the other backends;
+direct `CodexPipeline(skip_permissions=False)` runs read-only with approvals disabled.
+
+Codex uses [`codex exec --json`](https://developers.openai.com/codex/noninteractive) for each
+turn and `codex exec resume <thread-id>` for later messages. A session id is assigned when the
+first turn starts. `fork: true` uses `codex exec fork` on the first message; the pending fork
+is saved until the CLI reports its new id. Whole-conversation copies work; cutting or
+rewinding Codex at a message is not supported. Interrupts/timeouts terminate the CLI process
+group, including its tools, and the next message resumes the same conversation.
+
+Hub-launched Codex agents automatically receive a required `agent-landline` stdio MCP server,
+configured per invocation with the hub's Python interpreter, agent identity, socket, and
+permissions. Only hub tools are enabled on this server and approved for unattended use;
+the hub enforces `manages` and `spawns` permissions. There is no manual MCP setup or change
+to the user's Codex config. Replies,
+reasoning summaries, commands, file changes, searches, and MCP calls feed the usual live
+events. Images use `--image`. Native rollouts under `$CODEX_HOME/sessions/` or
+`archived_sessions/` provide transcripts and the latest model-call context usage/window
+after each turn; cumulative `exec` usage is not treated as context occupancy.
+
+Agents with `spawns` may start Codex when `"backends": ["codex"]` is allowed explicitly.
+The existing default spawn allowlist remains Claude and AGY.
 
 - **Python 3.10+**
 - **Antigravity CLI (`agy`)** and/or **Claude Code CLI (`claude`)**: Ensure whichever backend(s) you plan to use are installed and available in your `PATH`.

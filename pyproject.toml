@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentlandline"
 dynamic = ["version"]
-description = "MCP server and Python engine driving headless agent CLI sessions (Antigravity agy, Claude Code)."
+description = "MCP server and Python engine driving headless agent CLI sessions (Antigravity, Claude Code, Codex)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

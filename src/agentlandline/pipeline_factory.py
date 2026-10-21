@@ -11,6 +11,7 @@ from typing import Dict, Type, Optional, Union
 
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
+from .codex_pipeline import CodexPipeline
 
 DEFAULT_BACKEND = "antigravity"
 
@@ -24,11 +25,15 @@ BACKEND_ALIASES: Dict[str, str] = {
     "claude-code": "claude",
     "claude-cli": "claude",
     "anthropic": "claude",
+    "codex": "codex",
+    "codex-cli": "codex",
+    "openai": "codex",
 }
 
 BACKEND_REGISTRY: Dict[str, Type] = {
     "antigravity": AgyPipeline,
     "claude": ClaudePipeline,
+    "codex": CodexPipeline,
 }
 
 
@@ -50,7 +55,7 @@ def pipeline_class_for(backend: Optional[str] = DEFAULT_BACKEND) -> Type:
     return BACKEND_REGISTRY[normalize_backend(backend)]
 
 
-def create_pipeline(backend: Optional[str] = DEFAULT_BACKEND, **kwargs) -> Union[AgyPipeline, ClaudePipeline]:
+def create_pipeline(backend: Optional[str] = DEFAULT_BACKEND, **kwargs) -> Union[AgyPipeline, ClaudePipeline, CodexPipeline]:
     """Constructs the pipeline for the given backend name/alias with the given constructor kwargs."""
     cls = pipeline_class_for(backend)
     return cls(**kwargs)

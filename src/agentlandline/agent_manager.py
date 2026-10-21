@@ -11,6 +11,7 @@ import logging
 from typing import Optional, Dict, Any, List, Union
 from .agy_pipeline import AgyPipeline, AgentTurnResult
 from .claude_pipeline import ClaudePipeline
+from .codex_pipeline import CodexPipeline
 from .pipeline_factory import normalize_backend, DEFAULT_BACKEND
 
 logger = logging.getLogger("AgentManager")
@@ -23,7 +24,7 @@ class AgentManager:
     """
 
     def __init__(self):
-        self.pipeline: Optional[Union[AgyPipeline, ClaudePipeline]] = None
+        self.pipeline: Optional[Union[AgyPipeline, ClaudePipeline, CodexPipeline]] = None
         self.backend: Optional[str] = None
         self.last_prompt_output: Optional[str] = None
         self.last_turn_status: Optional[str] = None
@@ -97,6 +98,12 @@ class AgentManager:
                 permission_mode=permission_mode,
                 fork_session=fork_session
             )
+        elif resolved_backend == "codex":
+            if new_conversation_id:
+                return {"status": "ERROR", "error": "Codex assigns new thread ids; omit new_conversation_id.",
+                        "conversation_id": conversation_id}
+            self.pipeline = CodexPipeline(cwd=cwd, skip_permissions=skip_permissions, model=model,
+                                          effort=effort, conversation_id=conversation_id, fork_session=fork_session)
         else:
             self.pipeline = AgyPipeline(
                 cwd=cwd,
@@ -191,7 +198,38 @@ class AgentManager:
             target_cwd = cwd or (self.pipeline.cwd if self.pipeline else None) or os.getcwd()
             return self._extract_last_command_claude(target_conv_id, target_cwd)
 
+        if resolved_backend == "codex":
+            return self._extract_last_command_codex(target_conv_id)
+
         return self._extract_last_command_antigravity(target_conv_id)
+
+    def _extract_last_command_codex(self, session: str) -> Dict[str, Any]:
+        path = CodexPipeline.transcript_path_for(session)
+        if not path:
+            return {"error": f"Transcript file not found for conversation_id={session}"}
+        prompt = response = None
+        try:
+            with open(path, encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(obj, dict) or obj.get("type") != "response_item":
+                        continue
+                    item = obj.get("payload") or {}
+                    if item.get("type") != "message":
+                        continue
+                    text = "\n".join(b.get("text", "") for b in item.get("content", [])
+                                     if isinstance(b, dict) and b.get("type") in ("input_text", "output_text"))
+                    if item.get("role") == "user":
+                        prompt, response = text, None
+                    elif item.get("role") == "assistant":
+                        response = text
+            return {"conversation_id": session, "transcript_path": path, "last_user_prompt": prompt,
+                    "last_agent_response": response, "last_step_index": None}
+        except OSError as exc:
+            return {"error": f"Failed reading transcript: {exc}"}
 
     def _extract_last_command_antigravity(self, target_conv_id: str) -> Dict[str, Any]:
         transcript_path = AgyPipeline.transcript_path_for(target_conv_id)
@@ -318,8 +356,8 @@ class AgentManager:
         if clean_mode == "process":
             is_proc_alive = (
                 self.pipeline._running and
-                self.pipeline.proc is not None and
-                self.pipeline.proc.poll() is None
+                (self.backend == "codex" or
+                 (self.pipeline.proc is not None and self.pipeline.proc.poll() is None))
             )
             return {
                 "mode": "process",
