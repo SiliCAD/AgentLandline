@@ -243,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.set_defaults(func=cmd_send)
 
     spawn = sub.add_parser("spawn", help="Start another agent in the running hub")
-    spawn.add_argument("backend", help="claude or agy")
+    spawn.add_argument("backend", help="claude, agy, or codex")
     spawn.add_argument("name")
     spawn.add_argument("--model")
     spawn.add_argument("--effort")

@@ -1,3 +1,3 @@
-"""AgentLandline: drive headless agent CLI sessions (Antigravity `agy`, Claude Code `claude`)."""
+"""AgentLandline: drive headless Antigravity, Claude Code, and Codex CLI sessions."""
 
-__version__ = "2.0.0.dev0"
+__version__ = "2.0.0.dev1"

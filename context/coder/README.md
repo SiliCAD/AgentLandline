@@ -17,6 +17,7 @@ AgentLandline/
 │       ├── agent_manager.py  # High-level session orchestration, DB fork, & transcript parsing
 │       ├── agy_pipeline.py   # Subprocess bridge launching agy (stream-json bidirectional pipes)
 │       ├── claude_pipeline.py# Subprocess bridge launching claude (stream-json)
+│       ├── codex_pipeline.py # Codex exec JSONL, resume/fork, images, hub MCP config
 │       ├── hub.py            # Multi-agent hub: inboxes, routing, socket API
 │       ├── message_log.py    # messages.jsonl (who sent which message to whom)
 │       ├── events.py         # Normalized live events for both CLIs

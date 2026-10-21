@@ -47,6 +47,7 @@ anything else:
 | :--- | :--- | :--- |
 | `agy`, `antigravity`, `antigravity-cli`, `gemini` | `antigravity` | `AgyPipeline` |
 | `claude`, `claude-code`, `claude-cli`, `anthropic` | `claude` | `ClaudePipeline` |
+| `codex`, `codex-cli`, `openai` | `codex` | `CodexPipeline` |
 
 `AgentManager.initialize(..., backend=...)` calls this before constructing a pipeline, so an
 unknown backend name fails fast with a clear error instead of falling through to a default.
@@ -155,6 +156,39 @@ constructor kwargs aren't identical — only `ClaudePipeline` takes `permission_
 ---
 
 ## 6. Testing
+
+- `tests/test_codex_backend.py` — offline Codex registry/manager/hub tests and real pipes to a
+  fake executable: multi-turn resume, delayed fork id persistence, images, MCP config,
+  environment isolation, CLI errors/EOF, cancellation and timeout recovery, rollout context.
+- `tests/test_codex_live.py` — opt-in CLI login/MCP/resume/fork smoke test (`LANDLINE_CODEX_LIVE=1`).
+
+## Codex protocol (`codex_pipeline.py`)
+
+Codex CLI >=0.149.0 uses one `exec --json` process per turn, then `exec resume <thread-id>`.
+Prompts go through stdin (`-`); images are individual `--image` argv entries. Unlike the
+other backends, `start()` only checks CLI availability: there is no process until a message.
+`AgentTurnResult`/`ToolExecution` retain the existing public result shape (imported from the
+Claude module). Each turn has its own stdout/stderr readers; stderr drains concurrently,
+buffers are bounded, and process groups are terminated/reaped on interruption, timeout or
+close. `interrupt()` can latch before Popen completes. Thread ids survive failed turns.
+
+`thread.started` sets `conversation_id` before notifying the hub. `item.started/completed`
+map to shared text/thinking/tool events; `turn.completed/failed` map to turn status. The
+hub attaches an `agent-landline` MCP server via command-line TOML overrides with explicit
+LANDLINE_* env, required startup, and a 24-hour tool timeout for inter-agent waits. Only hub
+tools are enabled, with per-server approval mode `approve`; manager/reporting tools are
+excluded. Manage/spawn tools are enabled only with their corresponding LANDLINE_* flag.
+The child inherits a minimal login environment including CODEX_HOME, excluding API keys.
+
+Full copies use `exec fork <source-id>` once, then resume the new id. Hub spec.fork and its
+source id remain persisted until the first thread.started clears the flag. No Codex support
+is added to REWIND_BACKENDS (cuts after a particular message remain unsupported).
+
+Native transcripts are `response_item` payloads in
+`$CODEX_HOME/{sessions,archived_sessions}/**/rollout-*-<thread-id>.jsonl`.
+Latest `turn_context.model` and `event_msg.token_count.info.last_token_usage` supply the
+context meter through a private `codex.context` raw event. Context windows are learned
+from `model_context_window`; aggregated turn usage is never used as context occupancy.
 
 - `tests/test_pipeline_backends.py` — offline unit tests: backend alias resolution, launch-argv
   construction per backend, `ClaudePipeline._handle_event()` fed synthetic stream-json events

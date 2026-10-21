@@ -31,6 +31,12 @@ tests/
 ```bash
 pytest tests --ignore=tests/test_agy_pipeline.py --ignore=tests/test_claude_pipeline.py
 ```
+
+Codex offline coverage lives in `test_codex_backend.py` (fake executable, real pipes,
+timeouts/interruption, resume/fork, hub persistence, MCP argv, and context). The optional
+`LANDLINE_CODEX_LIVE=1 pytest tests/test_codex_live.py -q` uses the saved Codex CLI login
+for actual MCP discovery, multi-turn memory, and a whole-session copy. It runs read-only
+in a temporary folder, ignores user config, and makes live model calls; it is skipped by default.
 `pyproject.toml` puts `src/` on the pytest path, so no install is needed to run tests.
 
 ### Run Specific Test Suites

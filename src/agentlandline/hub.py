@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
+from .codex_pipeline import CodexPipeline
 from .context_windows import ContextWindows
 from .context import (Checkpoints, ContextError, REWIND_BACKENDS, WAKEUP_ALL, normalize_manages, normalize_spawns,
                       normalize_wakeup, rules_for)
@@ -284,7 +285,11 @@ class Hub:
             env["LANDLINE_SPAWNS"] = "1"   # the agent gets start_agent, stop_agent and find_sessions
         if spec.fork or spec.rewind:
             spec = replace(spec, last_context=None)  # a copy: its size is known after its first call
-        if spec.fork:
+        if spec.fork and spec.backend == "codex":
+            # Codex assigns the copied thread's id on its first prompted turn. Keep
+            # the source id and fork flag in run.json until that event arrives.
+            spec = replace(spec, forked_from=spec.session_id)
+        elif spec.fork:
             spec = replace(spec, rewind={"session_id": str(uuid.uuid4())}, forked_from=spec.session_id)
         if spec.rewind:
             # The pipeline starts on a copy of spec.session_id (cut at rewind["at"], if given); from
@@ -306,6 +311,11 @@ class Hub:
 
     @staticmethod
     def _make_pipeline(spec: AgentSpec, env: Dict[str, str]):
+        if spec.backend == "codex":
+            if spec.rewind:
+                raise HubError("Codex conversations can't be cut at a message yet.")
+            return CodexPipeline(cwd=spec.cwd, model=spec.model, effort=spec.effort,
+                                 conversation_id=spec.session_id, fork_session=spec.fork, extra_env=env)
         if spec.backend == "claude":
             # Hub turns can legitimately run for a long time (an agent waiting on
             # another agent's reply is itself mid tool call), so lift Claude
@@ -526,6 +536,7 @@ class Hub:
             slot.last_uuid = raw["uuid"]
         for event in normalize(slot.spec.backend, raw):
             if event["kind"] == "context":
+                self._learn_window(slot, event.get("context_windows") or {})
                 self._update_context(slot, event)
                 continue
             if event["kind"] == "compacted":
@@ -538,6 +549,8 @@ class Hub:
             if event["kind"] == "tool_start":
                 slot.turn_tools += 1
             if event["kind"] == "session":
+                if slot.spec.backend == "codex" and raw.get("type") == "thread.started":
+                    slot.spec = replace(slot.spec, session_id=event["session_id"], fork=False)
                 slot.reported_model = event.get("model") or slot.reported_model
                 slot.reported_session = event.get("session_id") or slot.reported_session
                 event = {**event, "model": self.model_in_use(slot)}
@@ -730,7 +743,7 @@ class Hub:
             self._emit({"kind": "turn_start", "agent": slot.spec.name, "message_id": record["id"]})
             try:
                 attached = record.get("images") or []
-                if attached and slot.spec.backend == "claude":
+                if attached and slot.spec.backend in ("claude", "codex"):
                     result = slot.pipeline.send(self._frame(slot, record), timeout=None, images=attached)
                 else:
                     result = slot.pipeline.send(self._frame(slot, record), timeout=None)
@@ -775,7 +788,7 @@ class Hub:
     def _frame(self, slot: _AgentSlot, record: Dict[str, Any]) -> str:
         notice, slot.notice = slot.notice, None
         attached = record.get("images") or []
-        inline = slot.spec.backend == "claude" and all(
+        inline = slot.spec.backend in ("claude", "codex") and all(
             os.path.getsize(p) <= image_files.MAX_INLINE_BYTES for p in attached if os.path.exists(p))
         return (notice or "") + self._frame_message(slot, record) + image_files.note(attached, inline)
 
