@@ -193,6 +193,10 @@ class _Delivery:
     done: threading.Event = field(default_factory=threading.Event)
     reply: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    # An agent's wait=False send: nobody is blocked on `done`, so the reply goes to the sender's inbox.
+    forward_reply: bool = False
+    # This delivery is such a reply (the id of the message it answers); the answer to it isn't forwarded.
+    reply_to: Optional[str] = None
 
 
 class _AgentSlot:
@@ -637,7 +641,9 @@ class Hub:
         """
         Sends `text` from `sender` (an agent name, 'user', or a sender added with add_sender) to agent `to`.
         With wait=True, blocks until `to` has finished the turn this message
-        starts and returns its reply; otherwise returns once it is queued.
+        starts and returns its reply; otherwise returns once it is queued, and
+        when the sender is an agent the reply reaches it later as a message of
+        its own (`_forward_reply`).
         Sending to 'user' just records the message (there is no inbox to deliver to).
         `images` are image file paths; they're copied into the run and attached
         (agentlandline.images).
@@ -668,7 +674,7 @@ class Hub:
         if to == USER:
             return {"status": "DELIVERED", "message": record}
 
-        delivery = _Delivery(record)
+        delivery = _Delivery(record, forward_reply=not wait and sender != USER)
         if wait and sender in self.agents:
             with self._lock:
                 self._waiting_on[sender] = to
@@ -768,9 +774,10 @@ class Hub:
             try:
                 attached = record.get("images") or []
                 if attached and slot.spec.backend in ("claude", "codex"):
-                    result = slot.pipeline.send(self._frame(slot, record), timeout=None, images=attached)
+                    result = slot.pipeline.send(self._frame(slot, record, delivery.reply_to), timeout=None,
+                                                images=attached)
                 else:
-                    result = slot.pipeline.send(self._frame(slot, record), timeout=None)
+                    result = slot.pipeline.send(self._frame(slot, record, delivery.reply_to), timeout=None)
                 if slot.stopping:
                     delivery.error = f"Agent '{slot.spec.name}' was stopped before replying."
                 else:
@@ -782,6 +789,8 @@ class Hub:
                         outcome = f"failed: {result.error or result.status}"
                     delivery.reply = self._record(slot.spec.name, record["from"], reply_text, caused_by=record["id"])
                     self._checkpoint(slot, record, delivery.reply, result)
+                    if delivery.forward_reply:
+                        self._forward_reply(delivery)
             except Exception as e:
                 logger.error(f"Agent {slot.spec.name} failed handling {record['id']}: {e}")
                 delivery.error = str(e)
@@ -812,19 +821,32 @@ class Hub:
                     self._emit({"kind": "agent_updated", "agent": slot.spec.name, "info": self._agent_info(slot),
                                 "restart": "failed", "error": str(e)})
 
+    def _forward_reply(self, delivery: _Delivery):
+        """
+        Puts the reply to an agent's wait=False message in that agent's inbox, so it gets it as a turn
+        (nothing else would read it). The sender's answer to it is only recorded, not forwarded again,
+        so two agents can't keep each other busy.
+        """
+        sender = self.agents.get(delivery.record["from"])
+        if sender is None or sender.stopping:
+            return
+        sender.inbox.put(_Delivery(delivery.reply, reply_to=delivery.record["id"]))
+
     @staticmethod
     def _describe(slot: _AgentSlot) -> str:
         return f"- {slot.spec.name}" + (f": {slot.spec.role}" if slot.spec.role else "")
 
-    def _frame(self, slot: _AgentSlot, record: Dict[str, Any]) -> str:
+    def _frame(self, slot: _AgentSlot, record: Dict[str, Any], reply_to: Optional[str] = None) -> str:
         notice, slot.notice = slot.notice, None
         attached = record.get("images") or []
         inline = slot.spec.backend in ("claude", "codex") and all(
             os.path.getsize(p) <= image_files.MAX_INLINE_BYTES for p in attached if os.path.exists(p))
-        return (notice or "") + self._frame_message(slot, record) + image_files.note(attached, inline)
+        return (notice or "") + self._frame_message(slot, record, reply_to) + image_files.note(attached, inline)
 
-    def _frame_message(self, slot: _AgentSlot, record: Dict[str, Any]) -> str:
-        header = f"[landline message {record['id']} from {record['from']}]\n"
+    def _frame_message(self, slot: _AgentSlot, record: Dict[str, Any], reply_to: Optional[str] = None) -> str:
+        header = (f"[landline message {record['id']} from {record['from']}, the reply to your {reply_to}; "
+                  f"your response to it isn't sent back]\n" if reply_to
+                  else f"[landline message {record['id']} from {record['from']}]\n")
         others_now = [s for s in self._slots() if s is not slot]
         if slot.introduced:
             joined = [s for s in others_now if s.spec.name not in slot.known_agents]
@@ -848,7 +870,8 @@ class Hub:
             "Messages to you arrive with a [landline message <id> from <sender>] header. Just do what the "
             "message asks and answer in your response: your final response is delivered back to the sender "
             "automatically, so don't use a tool to reply. To ask another agent something yourself, call the "
-            "agent-landline `message_agent` tool with `to` and `text`; it returns their reply.\n"
+            "agent-landline `message_agent` tool with `to` and `text`; it returns their reply (with "
+            "wait=false it returns at once, and the reply arrives later as a message to you).\n"
             + earlier + "\n"
         )
         return intro + header + record["text"]
