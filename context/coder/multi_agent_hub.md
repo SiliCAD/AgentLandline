@@ -88,6 +88,11 @@ landline up run.json
 
   `_new_slot` handles `fork` and `rewind` alike: it starts the pipeline on the copy, then gives the slot
   a spec with the copy's `session_id`. `find_sessions` reads every `runs/*/run.json` under the hub's home.
+- **Senders that aren't agents**: `Hub.add_sender(name)` (op `sender`, user only) lets a tool or driver
+  send under its own name, e.g. MultiMind sending a watcher agent its batches of EDA calls as `eda-mcp`.
+  The agent's reply goes back to that name, so it isn't a message to the user, and the agent can still
+  message `user` itself. Sender names follow agent-name rules, can't be an agent's name (nor become one),
+  can't `force`, and aren't kept in `run.json`: the tool adds itself again on each start.
 - **Permissions while running**: `Hub.set_permissions(agent, manages, spawns)` (op `permissions`, user only)
   normalizes and sets both. If the agent's tool set changes (`bool(manages)` or `bool(spawns)` flips), it
   calls `_restart` (resume its own session) now if idle, else sets `slot.restart_pending`, and the worker
@@ -182,6 +187,7 @@ One JSON request line per connection, answered with one JSON line (`subscribe` k
 ```json
 {"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true, "timeout": null, "images": ["/abs/plot.png"]}
 {"op": "list"}
+{"op": "sender", "name": "eda-mcp"}
 {"op": "messages"}
 {"op": "stop", "name": "reviewer"}
 {"op": "rename", "run": "opamp-review"}

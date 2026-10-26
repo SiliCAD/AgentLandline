@@ -31,7 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
@@ -266,6 +266,9 @@ class Hub:
         self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
         self._lock = threading.Lock()
         self._waiting_on: Dict[str, str] = {}  # agent -> agent whose reply it is waiting for
+        # Senders that aren't agents, added by the user (add_sender): e.g. "eda-mcp" for a tool's events, so
+        # its messages, and the agent's replies to them, aren't the user's.
+        self.senders: Set[str] = set()
         self._starting: set = set()  # names of agents being spawned right now
         self._run_file_lock = threading.Lock()  # run.json is rewritten from several threads
         # Agents stopped with stop_agent(): kept in run.json (marked stopped) so the
@@ -383,6 +386,8 @@ class Hub:
         with self._lock:
             if spec.name in self.agents or spec.name in self._starting:
                 raise HubError(f"An agent named '{spec.name}' already exists.")
+            if spec.name in self.senders:
+                raise HubError(f"'{spec.name}' is a sender in this session, not an agent.")
             self._starting.add(spec.name)
         try:
             slot = self._new_slot(spec)
@@ -611,10 +616,26 @@ class Hub:
 
     # -------------------------------------------------------------- messaging
 
+    def add_sender(self, name: str) -> List[str]:
+        """
+        Lets `name`, which isn't an agent, send messages: a tool or driver acting on its own account
+        (e.g. "eda-mcp", sending a watcher agent the EDA calls it should look at). The agent's reply goes
+        back to `name`, so it isn't a message to the user; the agent can still message the user itself.
+        Returns the senders. Adding one twice is fine.
+        """
+        if not AGENT_NAME.match(name or "") or name.lower() in RESERVED_NAMES:
+            raise HubError(f"Invalid sender name '{name}': use letters, digits, - or _ (start with a letter), "
+                           f"and not {' or '.join(repr(n) for n in sorted(RESERVED_NAMES))}.")
+        with self._lock:
+            if name in self.agents or name in self._starting:
+                raise HubError(f"'{name}' is an agent in this session.")
+            self.senders.add(name)
+            return sorted(self.senders)
+
     def send(self, sender: str, to: str, text: str, wait: bool = True, timeout: Optional[float] = None,
              images: Optional[List[str]] = None, force: bool = False) -> Dict[str, Any]:
         """
-        Sends `text` from `sender` (an agent name or 'user') to agent `to`.
+        Sends `text` from `sender` (an agent name, 'user', or a sender added with add_sender) to agent `to`.
         With wait=True, blocks until `to` has finished the turn this message
         starts and returns its reply; otherwise returns once it is queued.
         Sending to 'user' just records the message (there is no inbox to deliver to).
@@ -626,7 +647,7 @@ class Hub:
         """
         if force and sender != USER:
             raise HubError("Only the user can interrupt an agent.")
-        if sender != USER and sender not in self.agents:
+        if sender != USER and sender not in self.agents and sender not in self.senders:
             raise HubError(f"Unknown sender '{sender}'.")
         if to != USER and to not in self.agents:
             raise HubError(f"Unknown agent '{to}'. Agents: {list(self.agents)}")
@@ -640,7 +661,7 @@ class Hub:
             raise HubError("Message text is empty.")
         text = text or ""
 
-        if wait and to != USER and sender != USER:
+        if wait and to != USER and sender in self.agents:
             self._check_wait_cycle(sender, to)
 
         record = self._record(sender, to, text, images=image_files.store(self.run_dir, attached) if attached else None)
@@ -648,7 +669,7 @@ class Hub:
             return {"status": "DELIVERED", "message": record}
 
         delivery = _Delivery(record)
-        if wait and sender != USER:
+        if wait and sender in self.agents:
             with self._lock:
                 self._waiting_on[sender] = to
         target = self.agents[to]
@@ -665,7 +686,7 @@ class Hub:
         try:
             finished = delivery.done.wait(timeout)
         finally:
-            if sender != USER:
+            if sender in self.agents:
                 with self._lock:
                     self._waiting_on.pop(sender, None)
         if not finished:
@@ -721,7 +742,7 @@ class Hub:
     def _record(self, sender: str, to: str, text: str, caused_by: Optional[str] = None,
                 images: Optional[List[str]] = None) -> Dict[str, Any]:
         session = transcript = None
-        if sender != USER:
+        if sender in self.agents:  # not the user, nor a sender that isn't an agent
             slot = self.agents[sender]
             session = slot.pipeline.conversation_id
             transcript = slot.pipeline.transcript_path()
@@ -1317,6 +1338,7 @@ class Hub:
 # Local socket API: one JSON request line per connection, JSON response line(s).
 #   {"op": "send", "from": "user", "to": "coder", "text": "...", "wait": true, "images": ["/path/plot.png"]}
 #   {"op": "list"}
+#   {"op": "sender", "name": "eda-mcp"}   (user only) -> {"senders": [...]}: lets a non-agent send
 #   {"op": "context", "from": "lead", "agent": "fixer", "action": "list" | "rewind", "after": "m7", "note": "..."}
 #   {"op": "team", "from": "lead", "action": "start" | "stop" | "sessions", "name": "fixer-2", ...}
 #   {"op": "permissions", "agent": "lead", "manages": {...} | null, "spawns": {...} | true | null,
@@ -1365,6 +1387,10 @@ class HubServer:
                         self._reply({"ok": True, "run": hub.rename(request.get("run") or "")})
                     elif op == "list":
                         self._reply({"ok": True, "run": hub.run_id, "agents": hub.list_agents()})
+                    elif op == "sender":
+                        if (request.get("from") or USER) != USER:
+                            raise HubError("Only the user can add a sender.")
+                        self._reply({"ok": True, "senders": hub.add_sender(request.get("name") or "")})
                     elif op == "permissions":
                         if (request.get("from") or USER) != USER:
                             self._reply({"ok": False, "error": "Only the user can change permissions."})
@@ -1482,6 +1508,10 @@ class HubClient:
 
     def list_agents(self) -> Dict[str, Any]:
         return self.request({"op": "list"})
+
+    def add_sender(self, name: str) -> Dict[str, Any]:
+        """Lets `name`, which isn't an agent, send messages (Hub.add_sender)."""
+        return self.request({"op": "sender", "name": name})
 
     def stop_agent(self, name: str) -> Dict[str, Any]:
         return self.request({"op": "stop", "name": name})
