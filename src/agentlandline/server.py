@@ -164,7 +164,8 @@ def message_agent(to: str, text: str, wait: bool = True, images: Optional[list] 
         to: Name of the agent to message (see list_agents), or 'user'.
         text: The message. Be self-contained: the other agent can't see your conversation.
         wait: If true (default), wait until the agent has handled the message and return its reply.
-              If false, return once the message is queued.
+              If false, return once the message is queued; the reply then arrives later as a message
+              to you, after your current turn.
         images: Optional image files to attach (paths to .png, .jpg, .gif or .webp files), e.g. a plot
                 or a screenshot the other agent should look at.
     """

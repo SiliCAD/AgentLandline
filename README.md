@@ -209,7 +209,7 @@ landline tail        # follow live activity
 landline messages    # the run's message log
 ```
 
-Agents talk to each other with the `message_agent(to, text, wait=True)` and `list_agents()` MCP tools. These appear automatically in agents started by the hub, provided agent-landline is in that CLI's MCP config. A message that arrives while an agent is busy waits until its current turn ends, and an agent's final response to a message is delivered back to the sender.
+Agents talk to each other with the `message_agent(to, text, wait=True)` and `list_agents()` MCP tools. These appear automatically in agents started by the hub, provided agent-landline is in that CLI's MCP config. A message that arrives while an agent is busy waits until its current turn ends, and an agent's final response to a message is delivered back to the sender. With `wait=True` it is the tool's result; with `wait=False` the tool returns at once (`QUEUED`), and the reply comes to the sending agent later as a message of its own, headed `[landline message m83 from b, the reply to your m82; …]`. The sender's response to that reply is recorded but not sent back, so two agents can't keep each other busy.
 
 **Adding agents while it runs.** `landline up` with no config starts an empty hub.
 `landline spawn <claude|agy> <name> [--model --effort --cwd --role --session]` starts another agent in the

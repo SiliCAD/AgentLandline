@@ -143,6 +143,52 @@ def test_no_wait_send_is_queued_and_delivered_later(short_dir):
         hub.stop()
 
 
+def wait_until(condition, timeout=5.0):
+    deadline = time.time() + timeout
+    while not condition():
+        assert time.time() < deadline, "timed out"
+        time.sleep(0.02)
+
+
+def test_reply_to_an_agents_no_wait_send_reaches_it_as_a_message(short_dir):
+    holder = {}
+
+    def a_behaviour(prompt):
+        if "from user]" in prompt:
+            queued = holder["hub"].send("a", "b", "hi", wait=False)
+            holder["sent"] = queued["message"]["id"]
+            return "sent b a hi"
+        return "thanks"  # its response to b's reply
+
+    hub, pipelines = make_hub(short_dir, {"a": a_behaviour, "b": lambda prompt: "hi back"}, a={}, b={})
+    holder["hub"] = hub
+    try:
+        assert hub.send("user", "a", "say hi to b")["reply"]["text"] == "sent b a hi"
+        wait_until(lambda: len(pipelines["a"].prompts) == 2 and not hub.agents["a"].busy)
+        reply = next(m for m in hub.log.read_all() if m["from"] == "b")
+        assert reply["to"] == "a" and reply["caused_by"] == holder["sent"]
+        assert pipelines["a"].prompts[1] == (f"[landline message {reply['id']} from b, the reply to your "
+                                             f"{holder['sent']}; your response to it isn't sent back]\nhi back")
+        # a's answer to the reply is recorded, but b isn't woken by it.
+        time.sleep(0.2)
+        assert any(m["from"] == "a" and m["to"] == "b" and m["text"] == "thanks" for m in hub.log.read_all())
+        assert len(pipelines["b"].prompts) == 1
+    finally:
+        hub.stop()
+
+
+def test_waited_replies_and_the_users_no_wait_sends_are_not_forwarded(short_dir):
+    hub, pipelines = make_hub(short_dir, {}, a={}, b={})
+    try:
+        hub.send("user", "b", "fyi", wait=False)
+        hub.send("user", "a", "go")
+        hub.send("user", "b", "second")
+        time.sleep(0.2)
+        assert len(pipelines["a"].prompts) == 1 and len(pipelines["b"].prompts) == 2
+    finally:
+        hub.stop()
+
+
 def test_first_message_carries_intro_with_roles(short_dir):
     hub, pipelines = make_hub(short_dir, {}, a={"role": "architect"}, b={"role": "verification"})
     try:
