@@ -726,3 +726,62 @@ def test_default_socket_is_per_folder(tmp_path, monkeypatch):
     assert default_socket_path() == sock_a
     monkeypatch.setenv("LANDLINE_SOCKET", "/tmp/explicit.sock")
     assert default_socket_path(str(b)) == "/tmp/explicit.sock"
+
+
+def test_a_sender_that_is_not_an_agent_gets_the_reply_not_the_user(short_dir):
+    """A tool (eda-mcp) sends a watcher agent its calls: the reply goes back to it, not to the user."""
+    holder = {}
+
+    def watcher(prompt):
+        if "needs the user" in prompt:
+            holder["hub"].send("watcher", "user", "Please look at the DRC run.", wait=False)
+        return "ok"
+
+    hub, pipelines = make_hub(short_dir, {"watcher": watcher}, watcher={})
+    holder["hub"] = hub
+    try:
+        with pytest.raises(HubError, match="Unknown sender"):
+            hub.send("eda-mcp", "watcher", "batch 1")
+        assert hub.add_sender("eda-mcp") == ["eda-mcp"] == hub.add_sender("eda-mcp")
+        result = hub.send("eda-mcp", "watcher", "batch 1")
+        assert result["status"] == "REPLIED" and result["reply"]["to"] == "eda-mcp"
+        assert "[landline message m1 from eda-mcp]\nbatch 1" in pipelines["watcher"].prompts[-1]
+        hub.send("eda-mcp", "watcher", "batch 2: needs the user")
+        log = [(m["from"], m["to"], m["caused_by"]) for m in hub.log.read_all()]
+        assert log == [("eda-mcp", "watcher", None), ("watcher", "eda-mcp", "m1"),
+                       ("eda-mcp", "watcher", None), ("watcher", "user", "m3"), ("watcher", "eda-mcp", "m3")]
+        assert hub.log.read_all()[0]["from_session"] is None  # not an agent: no session behind it
+        with pytest.raises(HubError, match="Only the user can interrupt"):
+            hub.send("eda-mcp", "watcher", "now", force=True)
+    finally:
+        hub.stop()
+
+
+def test_sender_names_are_checked_and_never_agents(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={})
+    try:
+        for bad in ("user", "all", "9lives", "", "has space"):
+            with pytest.raises(HubError, match="Invalid sender name"):
+                hub.add_sender(bad)
+        with pytest.raises(HubError, match="is an agent"):
+            hub.add_sender("a")
+        hub.add_sender("eda-mcp")
+        with pytest.raises(HubError, match="is a sender in this session"):
+            hub.spawn(AgentSpec("eda-mcp"))
+    finally:
+        hub.stop()
+
+
+def test_the_sender_op_is_for_the_user(short_dir):
+    hub, _ = make_hub(short_dir, {}, a={})
+    server = HubServer(hub)
+    server.start()
+    try:
+        client = HubClient(hub.socket_path)
+        assert client.add_sender("eda-mcp") == {"ok": True, "senders": ["eda-mcp"]}
+        refused = client.request({"op": "sender", "from": "a", "name": "other"})
+        assert not refused["ok"] and "Only the user" in refused["error"]
+        assert client.send("eda-mcp", "a", "batch", wait=True)["reply"]["to"] == "eda-mcp"
+    finally:
+        server.stop()
+        hub.stop()
