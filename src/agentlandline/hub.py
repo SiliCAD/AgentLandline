@@ -31,7 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass, asdict, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .agy_pipeline import AgyPipeline
 from .claude_pipeline import ClaudePipeline
@@ -226,6 +226,9 @@ class _AgentSlot:
         self.turn_tools = 0                   # tool calls in the running turn
         self.notice: Optional[str] = None     # put in front of the next message delivered to it
         self.restart_pending = False          # restart its CLI once the running turn ends (new tools)
+        # The (manages, spawns, wakeup) its running CLI was started with, while a restart is pending:
+        # what it goes back to if that restart fails.
+        self.restart_from: Optional[Tuple[Any, Any, Any]] = None
         # When its last turn ended (time.monotonic(); None: no turn yet) and how: {message_id, from, outcome}.
         # The wake-up watcher reads them.
         self.idle_since: Optional[float] = None
@@ -780,6 +783,13 @@ class Hub:
                                 "info": self._agent_info(self.agents[slot.spec.name]), "restart": "done"})
                 except Exception as e:
                     logger.error(f"Couldn't restart {slot.spec.name} for its new permissions: {e}")
+                    # Its old CLI keeps running with its old tools, so it keeps its old settings too.
+                    if slot.restart_from is not None:
+                        slot.spec.manages, slot.spec.spawns, slot.spec.wakeup = slot.restart_from
+                        slot.restart_from = None
+                    self._write_run_file()
+                    self._emit({"kind": "agent_updated", "agent": slot.spec.name, "info": self._agent_info(slot),
+                                "restart": "failed", "error": str(e)})
 
     @staticmethod
     def _describe(slot: _AgentSlot) -> str:
@@ -994,16 +1004,24 @@ class Hub:
         if new_manages and agent in new_manages:
             raise HubError("An agent can't manage its own context.")
         tools_change = (bool(slot.spec.manages), bool(slot.spec.spawns)) != (bool(new_manages), bool(new_spawns))
-        if new_wakeup != slot.spec.wakeup:  # changed rules start over: they fire on the next idle stretch
-            self._wakeup_fired.pop(agent, None)
+        old = slot.spec.manages, slot.spec.spawns, slot.spec.wakeup
         slot.spec.manages, slot.spec.spawns, slot.spec.wakeup = new_manages, new_spawns, new_wakeup
         restart = None
         if tools_change:
             restart = "after its turn" if slot.busy else "now"
             if slot.busy:
+                if not slot.restart_pending:
+                    slot.restart_from = old
                 slot.restart_pending = True
             else:
-                slot = self._restart(agent)
+                try:
+                    slot = self._restart(agent)
+                except HubError:
+                    # Its old CLI keeps running with its old tools, so it keeps its old settings too.
+                    slot.spec.manages, slot.spec.spawns, slot.spec.wakeup = old
+                    raise
+        if new_wakeup != old[2]:  # changed rules start over: they fire on the next idle stretch
+            self._wakeup_fired.pop(agent, None)
         self._write_run_file()
         info = self._agent_info(slot)
         self._emit({"kind": "agent_updated", "agent": agent, "info": info, "restart": restart})

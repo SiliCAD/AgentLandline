@@ -93,6 +93,61 @@ def test_a_busy_agent_restarts_after_its_turn_and_keeps_waiting_messages(short_d
         hub.stop()
 
 
+def test_a_failed_restart_keeps_the_old_permissions(short_dir, monkeypatch):
+    hub, made = make_hub(short_dir, lead={}, fixer={})
+    events = []
+    hub.subscribe(events.append)
+    try:
+        before = latest(made, "lead")
+        monkeypatch.setattr(type(before), "start", lambda self, timeout=None: (_ for _ in ()).throw(RuntimeError("no CLI")))
+        with pytest.raises(HubError, match="Couldn't start 'lead' restarted"):
+            hub.set_permissions("lead", spawns=True)
+        assert hub.agents["lead"].pipeline is before and not before.closed
+        assert hub.agents["lead"].spec.spawns is None  # its old CLI has no spawn tools
+        assert not [e for e in events if e["kind"] == "agent_updated"]
+        monkeypatch.undo()
+        assert hub.set_permissions("lead", spawns=True)["restart"] == "now"  # trying again restarts it
+        assert latest(made, "lead") is not before
+    finally:
+        hub.stop()
+
+
+def test_a_failed_restart_after_its_turn_keeps_the_old_permissions(short_dir, monkeypatch):
+    hub, made = make_hub(short_dir, lead={}, fixer={})
+    events = []
+    hub.subscribe(events.append)
+    gate = threading.Event()
+    first = latest(made, "lead")
+    original_send = first.send
+
+    def slow_send(prompt, timeout=None, **kwargs):
+        gate.wait(5)
+        return original_send(prompt, timeout, **kwargs)
+
+    first.send = slow_send
+    try:
+        hub.send("user", "lead", "long job", wait=False)
+        deadline = time.monotonic() + 5
+        while not hub.agents["lead"].busy:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert hub.set_permissions("lead", spawns=True)["restart"] == "after its turn"
+        assert hub.set_permissions("lead", spawns={"max": 1})["restart"] is None  # still pending
+        monkeypatch.setattr(type(first), "start", lambda self, timeout=None: (_ for _ in ()).throw(RuntimeError("no CLI")))
+        gate.set()
+        deadline = time.monotonic() + 5
+        while not [e for e in events if e["kind"] == "agent_updated" and e["restart"] == "failed"]:
+            assert time.monotonic() < deadline, "the failed restart wasn't reported"
+            time.sleep(0.02)
+        failed = [e for e in events if e["kind"] == "agent_updated"][-1]
+        assert "no CLI" in failed["error"] and failed["info"]["spawns"] is None
+        assert hub.agents["lead"].pipeline is first and hub.agents["lead"].spec.spawns is None
+        assert "spawns" not in json.load(open(os.path.join(hub.run_dir, "run.json")))["agents"]["lead"]
+    finally:
+        gate.set()
+        hub.stop()
+
+
 def test_bad_permissions_are_refused(short_dir):
     hub, _ = make_hub(short_dir, lead={}, fixer={})
     try:
