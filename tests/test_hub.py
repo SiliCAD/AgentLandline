@@ -189,6 +189,89 @@ def test_waited_replies_and_the_users_no_wait_sends_are_not_forwarded(short_dir)
         hub.stop()
 
 
+def test_reply_to_a_busy_senders_no_wait_send_waits_for_its_turn_to_end(short_dir):
+    """#27: the reply comes in while the sender is still mid-turn; it is delivered once, as its next turn."""
+    holder, release = {}, threading.Event()
+
+    def a_behaviour(prompt):
+        if "from user]" in prompt:
+            holder["sent"] = holder["hub"].send("a", "b", "hi", wait=False)["message"]["id"]
+            wait_until(lambda: any(m["from"] == "b" for m in holder["hub"].log.read_all()))
+            holder["prompts_mid_turn"] = len(holder["pipelines"]["a"].prompts)
+            release.wait(5)
+            return "done"
+        return "thanks"
+
+    hub, pipelines = make_hub(short_dir, {"a": a_behaviour, "b": lambda prompt: "hi back"}, a={}, b={})
+    holder.update(hub=hub, pipelines=pipelines)
+    try:
+        hub.send("user", "a", "say hi to b", wait=False)
+        wait_until(lambda: "prompts_mid_turn" in holder)
+        assert holder["prompts_mid_turn"] == 1 and hub.agents["a"].busy        # b's reply is logged, a still busy
+        release.set()
+        wait_until(lambda: len(pipelines["a"].prompts) == 2 and not hub.agents["a"].busy)
+        reply = next(m for m in hub.log.read_all() if m["from"] == "b")
+        assert pipelines["a"].prompts[1].startswith(f"[landline message {reply['id']} from b, the reply to your "
+                                                    f"{holder['sent']};")
+        time.sleep(0.2)
+        assert len(pipelines["a"].prompts) == 2 and len(pipelines["b"].prompts) == 1   # once, and no ping-pong
+    finally:
+        hub.stop()
+
+
+def test_reply_from_a_busy_recipient_reaches_the_idle_sender(short_dir):
+    """#27's automatic reply: b answers a's no-wait message only after its own running turn; a is idle by then."""
+    holder, release = {}, threading.Event()
+
+    def a_behaviour(prompt):
+        if "from user]" in prompt:
+            holder["sent"] = holder["hub"].send("a", "b", "question", wait=False)["message"]["id"]
+            return "asked b"
+        return "noted"
+
+    def b_behaviour(prompt):
+        if "from user]" in prompt:
+            release.wait(5)
+            return "user done"
+        return "answer"
+
+    hub, pipelines = make_hub(short_dir, {"a": a_behaviour, "b": b_behaviour}, a={}, b={})
+    holder["hub"] = hub
+    try:
+        hub.send("user", "b", "long job", wait=False)
+        wait_until(lambda: hub.agents["b"].busy)
+        assert hub.send("user", "a", "ask b")["reply"]["text"] == "asked b"
+        assert not hub.agents["a"].busy and len(pipelines["a"].prompts) == 1   # a idle while b is still busy
+        release.set()
+        wait_until(lambda: len(pipelines["a"].prompts) == 2 and not hub.agents["a"].busy)
+        reply = next(m for m in hub.log.read_all() if m["from"] == "b" and m["to"] == "a")
+        assert reply["caused_by"] == holder["sent"] and pipelines["a"].prompts[1].endswith("\nanswer")
+    finally:
+        hub.stop()
+
+
+def test_a_waited_agent_send_returns_the_reply_inline_and_never_again(short_dir):
+    """#27: wait=True already hands the reply back in send(); it must not arrive a second time as a message."""
+    holder = {}
+
+    def a_behaviour(prompt):
+        if "from user]" in prompt:
+            res = holder["hub"].send("a", "b", "ping", wait=True)
+            holder["inline"] = res["reply"]
+            return "got " + res["reply"]["text"]
+        return "unexpected second turn"
+
+    hub, pipelines = make_hub(short_dir, {"a": a_behaviour, "b": lambda prompt: "pong"}, a={}, b={})
+    holder["hub"] = hub
+    try:
+        assert hub.send("user", "a", "ping b")["reply"]["text"] == "got pong"
+        time.sleep(0.3)
+        assert holder["inline"]["text"] == "pong" and len(pipelines["a"].prompts) == 1
+        assert not any(m["text"] == "unexpected second turn" for m in hub.log.read_all())
+    finally:
+        hub.stop()
+
+
 def test_first_message_carries_intro_with_roles(short_dir):
     hub, pipelines = make_hub(short_dir, {}, a={"role": "architect"}, b={"role": "verification"})
     try:
